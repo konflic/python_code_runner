@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+
+import gi
+import os
+import subprocess
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkSource", "3.0")
+from gi.repository import Gtk, Gio, GLib, Pango, GtkSource, Gdk, GdkPixbuf
+import io
+import contextlib
+
+INITIAL_SIZE = 700, 500
+
+class PythonRunnerApp(Gtk.Window):
+    def __init__(self):
+        Gtk.Window.__init__(self, title="Python Runner")
+        self.set_default_size(600, 400)
+
+        # Initialize GSettings with local schema
+        # For local usage
+        # schema_dir = GLib.get_current_dir()
+        # schema_source = Gio.SettingsSchemaSource.new_from_directory(
+        #     schema_dir,
+        #     Gio.SettingsSchemaSource.get_default(),
+        #     False,
+        # )
+
+        schema_source = Gio.SettingsSchemaSource.get_default()
+        schema = schema_source.lookup("com.example.python-runner", False)
+        self.settings = Gio.Settings.new_full(schema, None, None)
+        self.settings.connect("changed", self.on_settings_changed)
+
+        # Main vertical box
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.add(vbox)
+
+        # Toolbar with settings button
+        toolbar = Gtk.Toolbar()
+        settings_button = Gtk.ToolButton()
+        settings_button.set_icon_name("preferences-system-symbolic")  # Use an icon
+        settings_button.connect("clicked", self.on_settings_clicked)
+        toolbar.insert(settings_button, 0)
+        vbox.pack_start(toolbar, False, False, 0)
+
+        # Run button
+        run_button = Gtk.ToolButton(label="RUN")
+        run_button.connect("clicked", self.on_run_clicked)
+        toolbar.insert(run_button, 1)
+
+        # Create a Paned widget to allow resizing
+        self.paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        vbox.pack_start(self.paned, True, True, 0)
+
+        # Scrolled window for code input
+        self.code_input = GtkSource.View()
+
+        # Syntax highlight
+        self.code_buffer = GtkSource.Buffer()
+        self.code_input.set_buffer(self.code_buffer)
+        language_manager = GtkSource.LanguageManager()
+        python_language = language_manager.get_language("python")
+        self.code_buffer.set_language(python_language)
+        style_scheme_manager = GtkSource.StyleSchemeManager()
+        style_scheme = style_scheme_manager.get_scheme("solarized-dark")  # Use "tango" for a modern theme
+        self.code_buffer.set_style_scheme(style_scheme)
+
+        self.code_input.set_wrap_mode(Gtk.WrapMode.WORD)
+        self.code_input.set_monospace(True)
+        self.code_input.set_left_margin(10)  # Add left padding
+        self.code_input.set_right_margin(10)  # Add right padding
+        self.code_input.set_top_margin(10)  # Add top padding
+        self.code_input.set_bottom_margin(10)  # Add bottom padding
+
+        # Enable line numbers
+        self.code_input.set_show_line_numbers(True)
+
+        # Set light gray background color for the code input area
+        light_gray = Gdk.RGBA()
+        light_gray.parse("#40403f")  # Light gray color
+        self.code_input.override_background_color(Gtk.StateFlags.NORMAL, light_gray)
+
+        # Set tab width to 4 spaces
+        tab_array = Pango.TabArray.new(initial_size=1, positions_in_pixels=False)
+        tab_array.set_tab(0, Pango.TabAlign.LEFT, 4 * Pango.SCALE)  # 4 spaces
+        self.code_input.set_tabs(tab_array)
+
+        # Initialize SpaceDrawer
+        self.space_drawer = self.code_input.get_space_drawer()
+        self.space_drawer.set_enable_matrix(True)
+
+        scrolled_code = Gtk.ScrolledWindow()
+        scrolled_code.set_hexpand(True)
+        scrolled_code.set_vexpand(True)
+        scrolled_code.add(self.code_input)
+        self.paned.add1(scrolled_code)  # Add code area to the top pane
+
+        # Scrolled window for output
+        self.output_buffer = Gtk.TextBuffer()
+        self.output_view = Gtk.TextView(buffer=self.output_buffer)
+        self.output_view.set_editable(False)
+        self.output_view.set_monospace(True)
+        self.output_view.set_left_margin(10)  # Add left padding
+        self.output_view.set_right_margin(10)  # Add right padding
+        self.output_view.set_top_margin(10)  # Add top padding
+        self.output_view.set_bottom_margin(10)  # Add bottom padding
+        scrolled_output = Gtk.ScrolledWindow()
+        scrolled_output.set_hexpand(True)
+        scrolled_output.set_vexpand(True)
+        scrolled_output.add(self.output_view)
+        self.paned.add2(scrolled_output)  # Add output area to the bottom pane
+
+        # Set initial height of half initial window size
+        self.paned.set_position(INITIAL_SIZE[1] // 2 - 100)
+
+        # Status bar
+        self.status_bar = Gtk.Statusbar()
+        vbox.pack_start(self.status_bar, False, False, 0)
+
+        # Initialize Python environment status
+        self.update_python_env_status()
+
+        # Apply initial settings
+        self.apply_settings()
+
+    def on_run_clicked(self, widget):
+        # Get the code from the input area
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        # Determine the Python interpreter to use
+        python_interpreter = self.get_python_interpreter()
+
+        # Redirect stdout to capture output
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                # Execute the code using the selected Python interpreter
+                result = subprocess.run(
+                    [python_interpreter, "-c", code],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    print(result.stdout)
+                else:
+                    print(f"Error: {result.stderr}")
+            except Exception as e:
+                print(f"Error: {e}")
+
+        # Display the output
+        self.output_buffer.set_text(output.getvalue())
+
+    def on_settings_clicked(self, widget):
+        # Create a settings dialog
+        dialog = Gtk.Dialog(title="Settings", parent=self, flags=0)
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dialog.set_default_size(300, 200)
+
+        # Create a grid for settings
+        grid = Gtk.Grid(column_spacing=12, row_spacing=12, margin=12)
+        dialog.get_content_area().add(grid)
+
+        # Draw whitespaces toggle
+        draw_whitespaces_label = Gtk.Label(label="Draw Whitespaces:")
+        self.draw_whitespaces_switch = Gtk.Switch()
+        self.draw_whitespaces_switch.set_active(self.settings.get_boolean("draw-whitespaces"))
+        grid.attach(draw_whitespaces_label, 0, 0, 1, 1)
+        grid.attach(self.draw_whitespaces_switch, 1, 0, 1, 1)
+
+        # Tab size adjustment
+        tab_size_label = Gtk.Label(label="Tab Size (Spaces):")
+        self.tab_size_spin = Gtk.SpinButton.new_with_range(1, 8, 1)
+        self.tab_size_spin.set_value(self.settings.get_int("tab-size"))
+        grid.attach(tab_size_label, 0, 1, 1, 1)
+        grid.attach(self.tab_size_spin, 1, 1, 1, 1)
+
+        # Translate tabs to spaces toggle
+        translate_tabs_label = Gtk.Label(label="Translate Tabs to Spaces:")
+        self.translate_tabs_switch = Gtk.Switch()
+        self.translate_tabs_switch.set_active(self.settings.get_boolean("translate-tabs"))
+        grid.attach(translate_tabs_label, 0, 2, 1, 1)
+        grid.attach(self.translate_tabs_switch, 1, 2, 1, 1)
+
+        # Use custom venv toggle
+        use_custom_venv_label = Gtk.Label(label="Use Custom Venv:")
+        self.use_custom_venv_switch = Gtk.Switch()
+        self.use_custom_venv_switch.set_active(self.settings.get_boolean("use-custom-venv"))
+        grid.attach(use_custom_venv_label, 0, 3, 1, 1)
+        grid.attach(self.use_custom_venv_switch, 1, 3, 1, 1)
+
+        # Show the dialog
+        dialog.show_all()
+        response = dialog.run()
+
+        # Save settings if OK is clicked
+        if response == Gtk.ResponseType.OK:
+            self.settings.set_boolean("draw-whitespaces", self.draw_whitespaces_switch.get_active())
+            self.settings.set_int("tab-size", self.tab_size_spin.get_value_as_int())
+            self.settings.set_boolean("translate-tabs", self.translate_tabs_switch.get_active())
+            self.settings.set_boolean("use-custom-venv", self.use_custom_venv_switch.get_active())
+
+            # If "Use Custom Venv" is enabled, open a folder selection dialog
+            if self.use_custom_venv_switch.get_active():
+                folder_dialog = Gtk.FileChooserDialog(
+                    title="Select Venv Folder",
+                    parent=self,
+                    action=Gtk.FileChooserAction.SELECT_FOLDER,
+                )
+                folder_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+                response = folder_dialog.run()
+                if response == Gtk.ResponseType.OK:
+                    venv_folder = folder_dialog.get_filename()
+                    self.settings.set_string("venv-folder", venv_folder)
+                folder_dialog.destroy()
+
+            # Update Python environment status
+            self.update_python_env_status()
+
+        dialog.destroy()
+
+    def on_settings_changed(self, settings, key):
+        # Apply settings when they change
+        self.apply_settings()
+
+    def apply_settings(self):
+        # Apply draw whitespaces setting
+        if self.settings.get_boolean("draw-whitespaces"):
+            self.space_drawer.set_types_for_locations(
+                GtkSource.SpaceLocationFlags.ALL,
+                GtkSource.SpaceTypeFlags.SPACE | GtkSource.SpaceTypeFlags.TAB
+            )
+        else:
+            self.space_drawer.set_types_for_locations(GtkSource.SpaceLocationFlags.ALL, 0)
+
+        # Apply tab size setting
+        tab_size = self.settings.get_int("tab-size")
+        tab_array = Pango.TabArray.new(initial_size=1, positions_in_pixels=False)
+        tab_array.set_tab(0, Pango.TabAlign.LEFT, tab_size * Pango.SCALE)
+        self.code_input.set_tabs(tab_array)
+
+        # Apply translate tabs to spaces setting
+        if self.settings.get_boolean("translate-tabs"):
+            # Insert spaces instead of tabs
+            self.code_input.set_insert_spaces_instead_of_tabs(True)
+            # Set the number of spaces to insert
+            self.code_input.set_tab_width(tab_size)
+        else:
+            # Insert tabs
+            self.code_input.set_insert_spaces_instead_of_tabs(False)
+
+    def get_python_interpreter(self):
+        # Get the Python interpreter based on settings
+        if self.settings.get_boolean("use-custom-venv"):
+            venv_folder = self.settings.get_string("venv-folder")
+            if venv_folder:
+                return os.path.join(venv_folder, "bin", "python3")
+        return "python3"
+
+    def update_python_env_status(self):
+        # Update the status bar with the current Python environment
+        if self.settings.get_boolean("use-custom-venv"):
+            venv_folder = self.settings.get_string("venv-folder")
+            if venv_folder:
+                self.status_bar.push(0, f"Using custom venv: {venv_folder}")
+            else:
+                self.status_bar.push(0, "Custom venv not selected")
+        else:
+            self.status_bar.push(0, "Using system Python")
+
+if __name__ == "__main__":
+    app = PythonRunnerApp()
+    app.connect("destroy", Gtk.main_quit)
+    app.show_all()
+    Gtk.main()
