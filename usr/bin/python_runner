@@ -190,6 +190,9 @@ class PythonRunnerApp(Gtk.Window):
         use_custom_venv_hbox.pack_end(self.use_custom_venv_switch, False, False, 0)
         vbox.pack_start(use_custom_venv_hbox, False, False, 0)
 
+        # Connect signal to the "Use Custom Venv" switch
+        self.use_custom_venv_switch.connect("state-set", self.on_use_custom_venv_toggled, dialog)
+
         # Show the dialog
         dialog.show_all()
         response = dialog.run()
@@ -201,24 +204,26 @@ class PythonRunnerApp(Gtk.Window):
             self.settings.set_boolean("translate-tabs", self.translate_tabs_switch.get_active())
             self.settings.set_boolean("use-custom-venv", self.use_custom_venv_switch.get_active())
 
-            # If "Use Custom Venv" is enabled, open a folder selection dialog
-            if self.use_custom_venv_switch.get_active():
-                folder_dialog = Gtk.FileChooserDialog(
-                    title="Select Venv Folder",
-                    parent=self,
-                    action=Gtk.FileChooserAction.SELECT_FOLDER,
-                )
-                folder_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
-                response = folder_dialog.run()
-                if response == Gtk.ResponseType.OK:
-                    venv_folder = folder_dialog.get_filename()
-                    self.settings.set_string("venv-folder", venv_folder)
-                folder_dialog.destroy()
-
             # Update Python environment status
             self.update_python_env_status()
 
         dialog.destroy()
+
+    def on_use_custom_venv_toggled(self, switch, state, dialog):
+        # If the switch is toggled on, open the folder selection dialog
+        if state:
+            folder_dialog = Gtk.FileChooserDialog(
+                title="Select Venv Folder",
+                parent=dialog,
+                action=Gtk.FileChooserAction.SELECT_FOLDER,
+            )
+            folder_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+            response = folder_dialog.run()
+            if response == Gtk.ResponseType.OK:
+                venv_folder = folder_dialog.get_filename()
+                self.settings.set_string("venv-folder", venv_folder)
+                self.update_python_env_status()  # Update status bar immediately
+            folder_dialog.destroy()
 
     def on_settings_changed(self, settings, key):
         # Apply settings when they change
