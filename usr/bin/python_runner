@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 
-import gi
 import os
 import subprocess
-gi.require_version("Gtk", "3.0")
-gi.require_version("GtkSource", "3.0")
-from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk
+import threading
 import io
 import contextlib
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkSource", "3.0")
+
+from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk
+
 
 INITIAL_SIZE = 700, 500
 
@@ -37,6 +41,12 @@ class PythonRunnerApp(Gtk.Window):
         run_button = Gtk.ToolButton(label="RUN")
         run_button.connect("clicked", self.on_run_clicked)
         toolbar.insert(run_button, 1)
+
+        # Copy button
+        copy_button = Gtk.ToolButton()
+        copy_button.set_icon_name("edit-copy-symbolic")  # Default GTK copy icon
+        copy_button.connect("clicked", self.on_copy_clicked)
+        toolbar.insert(copy_button, -1)  # Add to the end of the toolbar
 
         # Create a Paned widget to allow resizing
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
@@ -112,6 +122,27 @@ class PythonRunnerApp(Gtk.Window):
 
         # Apply initial settings
         self.apply_settings()
+
+    def on_copy_clicked(self, widget):
+        # Get the code from the input area
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        # Copy the code to the clipboard
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(code, -1)
+
+        # Show a confirmation in the status bar
+        self.status_bar.push(0, "Code copied to clipboard")
+
+        # Remove the message after 1 second and restore the Python environment info
+        threading.Timer(1.0, self.restore_python_env_status).start()
+
+    def restore_python_env_status(self):
+        # Restore the Python environment status in the status bar
+        self.update_python_env_status()
 
     def on_run_clicked(self, widget):
         # Get the code from the input area

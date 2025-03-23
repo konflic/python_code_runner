@@ -2,7 +2,6 @@
 
 Simple python code runner for GNOME, for quick experiments and tries.
 
-
 ![Preview](./screenshot.png)
 
 Features:
