@@ -5,7 +5,7 @@ import os
 import subprocess
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "3.0")
-from gi.repository import Gtk, Gio, GLib, Pango, GtkSource, Gdk, GdkPixbuf
+from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk
 import io
 import contextlib
 
@@ -15,15 +15,6 @@ class PythonRunnerApp(Gtk.Window):
     def __init__(self):
         Gtk.Window.__init__(self, title="Python Runner")
         self.set_default_size(600, 400)
-
-        # Initialize GSettings with local schema
-        # For local usage
-        # schema_dir = GLib.get_current_dir()
-        # schema_source = Gio.SettingsSchemaSource.new_from_directory(
-        #     schema_dir,
-        #     Gio.SettingsSchemaSource.get_default(),
-        #     False,
-        # )
 
         schema_source = Gio.SettingsSchemaSource.get_default()
         schema = schema_source.lookup("com.example.python-runner", False)
@@ -157,38 +148,47 @@ class PythonRunnerApp(Gtk.Window):
         dialog = Gtk.Dialog(title="Settings", parent=self, flags=0)
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
         dialog.set_default_size(300, 200)
+        dialog.set_resizable(False)  # Prevent resizing
 
-        # Create a grid for settings
-        grid = Gtk.Grid(column_spacing=12, row_spacing=12, margin=12)
-        dialog.get_content_area().add(grid)
+        # Create a vertical box for settings
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=12)
+        dialog.get_content_area().add(vbox)
 
         # Draw whitespaces toggle
+        draw_whitespaces_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         draw_whitespaces_label = Gtk.Label(label="Draw Whitespaces:")
         self.draw_whitespaces_switch = Gtk.Switch()
         self.draw_whitespaces_switch.set_active(self.settings.get_boolean("draw-whitespaces"))
-        grid.attach(draw_whitespaces_label, 0, 0, 1, 1)
-        grid.attach(self.draw_whitespaces_switch, 1, 0, 1, 1)
+        draw_whitespaces_hbox.pack_start(draw_whitespaces_label, True, True, 0)
+        draw_whitespaces_hbox.pack_end(self.draw_whitespaces_switch, False, False, 0)
+        vbox.pack_start(draw_whitespaces_hbox, False, False, 0)
 
         # Tab size adjustment
+        tab_size_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         tab_size_label = Gtk.Label(label="Tab Size (Spaces):")
         self.tab_size_spin = Gtk.SpinButton.new_with_range(1, 8, 1)
         self.tab_size_spin.set_value(self.settings.get_int("tab-size"))
-        grid.attach(tab_size_label, 0, 1, 1, 1)
-        grid.attach(self.tab_size_spin, 1, 1, 1, 1)
+        tab_size_hbox.pack_start(tab_size_label, True, True, 0)
+        tab_size_hbox.pack_end(self.tab_size_spin, False, False, 0)
+        vbox.pack_start(tab_size_hbox, False, False, 0)
 
         # Translate tabs to spaces toggle
+        translate_tabs_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         translate_tabs_label = Gtk.Label(label="Translate Tabs to Spaces:")
         self.translate_tabs_switch = Gtk.Switch()
         self.translate_tabs_switch.set_active(self.settings.get_boolean("translate-tabs"))
-        grid.attach(translate_tabs_label, 0, 2, 1, 1)
-        grid.attach(self.translate_tabs_switch, 1, 2, 1, 1)
+        translate_tabs_hbox.pack_start(translate_tabs_label, True, True, 0)
+        translate_tabs_hbox.pack_end(self.translate_tabs_switch, False, False, 0)
+        vbox.pack_start(translate_tabs_hbox, False, False, 0)
 
         # Use custom venv toggle
+        use_custom_venv_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         use_custom_venv_label = Gtk.Label(label="Use Custom Venv:")
         self.use_custom_venv_switch = Gtk.Switch()
         self.use_custom_venv_switch.set_active(self.settings.get_boolean("use-custom-venv"))
-        grid.attach(use_custom_venv_label, 0, 3, 1, 1)
-        grid.attach(self.use_custom_venv_switch, 1, 3, 1, 1)
+        use_custom_venv_hbox.pack_start(use_custom_venv_label, True, True, 0)
+        use_custom_venv_hbox.pack_end(self.use_custom_venv_switch, False, False, 0)
+        vbox.pack_start(use_custom_venv_hbox, False, False, 0)
 
         # Show the dialog
         dialog.show_all()
