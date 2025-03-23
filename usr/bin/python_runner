@@ -259,15 +259,32 @@ class PythonRunnerApp(Gtk.Window):
         return "python3"
 
     def update_python_env_status(self):
-        # Update the status bar with the current Python environment
+        # Get the Python interpreter path
+        python_interpreter = self.get_python_interpreter()
+
+        # Get the Python version
+        try:
+            result = subprocess.run(
+                [python_interpreter, "--version"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                python_version = result.stdout.strip().replace("Python ", "")  # Extract version (e.g., "3.12.1")
+            else:
+                python_version = "Unknown"
+        except Exception:
+            python_version = "Unknown"
+
+        # Update the status bar
         if self.settings.get_boolean("use-custom-venv"):
             venv_folder = self.settings.get_string("venv-folder")
             if venv_folder:
-                self.status_bar.push(0, f"Using custom venv: {venv_folder}")
+                self.status_bar.push(0, f"Using Python ({python_version}) {venv_folder}")
             else:
                 self.status_bar.push(0, "Custom venv not selected")
         else:
-            self.status_bar.push(0, "Using system Python")
+            self.status_bar.push(0, f"Using system Python ({python_version})")
 
 if __name__ == "__main__":
     app = PythonRunnerApp()
