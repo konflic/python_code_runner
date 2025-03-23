@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 
-import gi
 import os
 import subprocess
-gi.require_version("Gtk", "3.0")
-gi.require_version("GtkSource", "3.0")
-from gi.repository import Gtk, Gio, GLib, Pango, GtkSource, Gdk, GdkPixbuf
+import threading
 import io
 import contextlib
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkSource", "3.0")
+
+from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk
+
 
 INITIAL_SIZE = 700, 500
 
@@ -15,15 +19,6 @@ class PythonRunnerApp(Gtk.Window):
     def __init__(self):
         Gtk.Window.__init__(self, title="Python Runner")
         self.set_default_size(600, 400)
-
-        # Initialize GSettings with local schema
-        # For local usage
-        # schema_dir = GLib.get_current_dir()
-        # schema_source = Gio.SettingsSchemaSource.new_from_directory(
-        #     schema_dir,
-        #     Gio.SettingsSchemaSource.get_default(),
-        #     False,
-        # )
 
         schema_source = Gio.SettingsSchemaSource.get_default()
         schema = schema_source.lookup("com.example.python-runner", False)
@@ -46,6 +41,12 @@ class PythonRunnerApp(Gtk.Window):
         run_button = Gtk.ToolButton(label="RUN")
         run_button.connect("clicked", self.on_run_clicked)
         toolbar.insert(run_button, 1)
+
+        # Copy button
+        copy_button = Gtk.ToolButton()
+        copy_button.set_icon_name("edit-copy-symbolic")  # Default GTK copy icon
+        copy_button.connect("clicked", self.on_copy_clicked)
+        toolbar.insert(copy_button, -1)  # Add to the end of the toolbar
 
         # Create a Paned widget to allow resizing
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
@@ -122,6 +123,27 @@ class PythonRunnerApp(Gtk.Window):
         # Apply initial settings
         self.apply_settings()
 
+    def on_copy_clicked(self, widget):
+        # Get the code from the input area
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        # Copy the code to the clipboard
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(code, -1)
+
+        # Show a confirmation in the status bar
+        self.status_bar.push(0, "Code copied to clipboard")
+
+        # Remove the message after 1 second and restore the Python environment info
+        threading.Timer(1.0, self.restore_python_env_status).start()
+
+    def restore_python_env_status(self):
+        # Restore the Python environment status in the status bar
+        self.update_python_env_status()
+
     def on_run_clicked(self, widget):
         # Get the code from the input area
         code_buffer = self.code_input.get_buffer()
@@ -157,38 +179,50 @@ class PythonRunnerApp(Gtk.Window):
         dialog = Gtk.Dialog(title="Settings", parent=self, flags=0)
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
         dialog.set_default_size(300, 200)
+        dialog.set_resizable(False)  # Prevent resizing
 
-        # Create a grid for settings
-        grid = Gtk.Grid(column_spacing=12, row_spacing=12, margin=12)
-        dialog.get_content_area().add(grid)
+        # Create a vertical box for settings
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=12)
+        dialog.get_content_area().add(vbox)
 
         # Draw whitespaces toggle
+        draw_whitespaces_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         draw_whitespaces_label = Gtk.Label(label="Draw Whitespaces:")
         self.draw_whitespaces_switch = Gtk.Switch()
         self.draw_whitespaces_switch.set_active(self.settings.get_boolean("draw-whitespaces"))
-        grid.attach(draw_whitespaces_label, 0, 0, 1, 1)
-        grid.attach(self.draw_whitespaces_switch, 1, 0, 1, 1)
+        draw_whitespaces_hbox.pack_start(draw_whitespaces_label, True, True, 0)
+        draw_whitespaces_hbox.pack_end(self.draw_whitespaces_switch, False, False, 0)
+        vbox.pack_start(draw_whitespaces_hbox, False, False, 0)
 
         # Tab size adjustment
+        tab_size_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         tab_size_label = Gtk.Label(label="Tab Size (Spaces):")
         self.tab_size_spin = Gtk.SpinButton.new_with_range(1, 8, 1)
         self.tab_size_spin.set_value(self.settings.get_int("tab-size"))
-        grid.attach(tab_size_label, 0, 1, 1, 1)
-        grid.attach(self.tab_size_spin, 1, 1, 1, 1)
+        tab_size_hbox.pack_start(tab_size_label, True, True, 0)
+        tab_size_hbox.pack_end(self.tab_size_spin, False, False, 0)
+        vbox.pack_start(tab_size_hbox, False, False, 0)
 
         # Translate tabs to spaces toggle
+        translate_tabs_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         translate_tabs_label = Gtk.Label(label="Translate Tabs to Spaces:")
         self.translate_tabs_switch = Gtk.Switch()
         self.translate_tabs_switch.set_active(self.settings.get_boolean("translate-tabs"))
-        grid.attach(translate_tabs_label, 0, 2, 1, 1)
-        grid.attach(self.translate_tabs_switch, 1, 2, 1, 1)
+        translate_tabs_hbox.pack_start(translate_tabs_label, True, True, 0)
+        translate_tabs_hbox.pack_end(self.translate_tabs_switch, False, False, 0)
+        vbox.pack_start(translate_tabs_hbox, False, False, 0)
 
         # Use custom venv toggle
+        use_custom_venv_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         use_custom_venv_label = Gtk.Label(label="Use Custom Venv:")
         self.use_custom_venv_switch = Gtk.Switch()
         self.use_custom_venv_switch.set_active(self.settings.get_boolean("use-custom-venv"))
-        grid.attach(use_custom_venv_label, 0, 3, 1, 1)
-        grid.attach(self.use_custom_venv_switch, 1, 3, 1, 1)
+        use_custom_venv_hbox.pack_start(use_custom_venv_label, True, True, 0)
+        use_custom_venv_hbox.pack_end(self.use_custom_venv_switch, False, False, 0)
+        vbox.pack_start(use_custom_venv_hbox, False, False, 0)
+
+        # Connect signal to the "Use Custom Venv" switch
+        self.use_custom_venv_switch.connect("state-set", self.on_use_custom_venv_toggled, dialog)
 
         # Show the dialog
         dialog.show_all()
@@ -201,24 +235,26 @@ class PythonRunnerApp(Gtk.Window):
             self.settings.set_boolean("translate-tabs", self.translate_tabs_switch.get_active())
             self.settings.set_boolean("use-custom-venv", self.use_custom_venv_switch.get_active())
 
-            # If "Use Custom Venv" is enabled, open a folder selection dialog
-            if self.use_custom_venv_switch.get_active():
-                folder_dialog = Gtk.FileChooserDialog(
-                    title="Select Venv Folder",
-                    parent=self,
-                    action=Gtk.FileChooserAction.SELECT_FOLDER,
-                )
-                folder_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
-                response = folder_dialog.run()
-                if response == Gtk.ResponseType.OK:
-                    venv_folder = folder_dialog.get_filename()
-                    self.settings.set_string("venv-folder", venv_folder)
-                folder_dialog.destroy()
-
             # Update Python environment status
             self.update_python_env_status()
 
         dialog.destroy()
+
+    def on_use_custom_venv_toggled(self, switch, state, dialog):
+        # If the switch is toggled on, open the folder selection dialog
+        if state:
+            folder_dialog = Gtk.FileChooserDialog(
+                title="Select Venv Folder",
+                parent=dialog,
+                action=Gtk.FileChooserAction.SELECT_FOLDER,
+            )
+            folder_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+            response = folder_dialog.run()
+            if response == Gtk.ResponseType.OK:
+                venv_folder = folder_dialog.get_filename()
+                self.settings.set_string("venv-folder", venv_folder)
+                self.update_python_env_status()  # Update status bar immediately
+            folder_dialog.destroy()
 
     def on_settings_changed(self, settings, key):
         # Apply settings when they change
@@ -259,15 +295,32 @@ class PythonRunnerApp(Gtk.Window):
         return "python3"
 
     def update_python_env_status(self):
-        # Update the status bar with the current Python environment
+        # Get the Python interpreter path
+        python_interpreter = self.get_python_interpreter()
+
+        # Get the Python version
+        try:
+            result = subprocess.run(
+                [python_interpreter, "--version"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                python_version = result.stdout.strip().replace("Python ", "")  # Extract version (e.g., "3.12.1")
+            else:
+                python_version = "Unknown"
+        except Exception:
+            python_version = "Unknown"
+
+        # Update the status bar
         if self.settings.get_boolean("use-custom-venv"):
             venv_folder = self.settings.get_string("venv-folder")
             if venv_folder:
-                self.status_bar.push(0, f"Using custom venv: {venv_folder}")
+                self.status_bar.push(0, f"Using Python ({python_version}) {venv_folder}")
             else:
                 self.status_bar.push(0, "Custom venv not selected")
         else:
-            self.status_bar.push(0, "Using system Python")
+            self.status_bar.push(0, f"Using system Python ({python_version})")
 
 if __name__ == "__main__":
     app = PythonRunnerApp()
