@@ -16,9 +16,28 @@ from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk
 INITIAL_SIZE = 700, 500
 
 class PythonRunnerApp(Gtk.Window):
+
     def __init__(self):
         Gtk.Window.__init__(self, title="Python Runner")
         self.set_default_size(*INITIAL_SIZE)
+        # Set minimum size to prevent resizing below initial size
+        self.set_size_request(INITIAL_SIZE[0], INITIAL_SIZE[1])
+
+        css_provider = Gtk.CssProvider()
+        css = """
+        #run-button image {
+            color: #2ECC71;
+        }
+        #run-button:hover image {
+            color: #27AE60;
+        }
+        """
+        css_provider.load_from_data(css.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
         schema_source = Gio.SettingsSchemaSource.get_default()
         schema = schema_source.lookup("com.example.python-runner", False)
@@ -29,25 +48,59 @@ class PythonRunnerApp(Gtk.Window):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.add(vbox)
 
-        # Toolbar with settings button
+
+        # Toolbar
         toolbar = Gtk.Toolbar()
-        settings_button = Gtk.ToolButton()
-        settings_button.set_icon_name("preferences-system-symbolic")  # Use an icon
-        settings_button.connect("clicked", self.on_settings_clicked)
-        toolbar.insert(settings_button, 0)
-        vbox.pack_start(toolbar, False, False, 0)
+
+        css_provider = Gtk.CssProvider()
+        css = """
+        toolbar {
+            -GtkToolbar-button-relief: none;
+            padding: 0px;
+            margin-top: 5px;
+            margin-bottom: 0;
+            margin-left: 2px;
+            margin-right: 2px;            
+            border-width: 0px;
+        }
+        toolbar button {
+            margin-top: 5px;
+            margin-bottom: 0;
+            margin-left: 2px;
+            margin-right: 2px;
+            padding: 0px;
+            border-radius: 0px;
+        }
+        toolbar button image {
+            padding: 0px;
+            margin: 0px;
+        }
+        """
+        css_provider.load_from_data(css.encode())
+        toolbar.get_style_context().add_provider(
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
         # Run button
         run_button = Gtk.ToolButton()
         run_button.set_icon_name("media-playback-start-symbolic")  # GTK play icon
+        run_button.set_name("run-button")
         run_button.connect("clicked", self.on_run_clicked)
-        toolbar.insert(run_button, 1)
+        toolbar.insert(run_button, 0)
 
         # Copy button
         copy_button = Gtk.ToolButton()
         copy_button.set_icon_name("edit-copy-symbolic")  # Default GTK copy icon
         copy_button.connect("clicked", self.on_copy_clicked)
-        toolbar.insert(copy_button, -1)  # Add to the end of the toolbar
+        toolbar.insert(copy_button, 1) 
+
+        # Settings button
+        settings_button = Gtk.ToolButton()
+        settings_button.set_icon_name("preferences-system-symbolic")  # Use an icon
+        settings_button.connect("clicked", self.on_settings_clicked)
+        toolbar.insert(settings_button, -1) # Add to the end of the toolbar
+        vbox.pack_start(toolbar, False, False, 0)
 
         # Create a Paned widget to allow resizing
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
@@ -115,9 +168,35 @@ class PythonRunnerApp(Gtk.Window):
         self.paned.set_position(INITIAL_SIZE[1] // 2 - 50)
 
         # Status bar
-        self.status_bar = Gtk.Statusbar()
-        vbox.pack_start(self.status_bar, False, False, 0)
-
+        # Create a compact status bar using a horizontal box instead
+        status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        status_box.set_border_width(0)
+        status_box.set_margin_top(0)
+        status_box.set_margin_bottom(5)
+        
+        # Add the status context label
+        self.status_label = Gtk.Label()
+        self.status_label.set_margin_top(0)
+        self.status_label.set_margin_bottom(0)
+        self.status_label.set_margin_start(6)
+        self.status_label.set_margin_end(6)
+        status_box.pack_start(self.status_label, False, False, 0)
+        
+        # Add a small separator
+        separator = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        separator.set_margin_top(2)
+        separator.set_margin_bottom(2)
+        status_box.pack_start(separator, False, False, 0)
+        
+        # Add the message label
+        self.status_message = Gtk.Label()
+        self.status_message.set_margin_top(0)
+        self.status_message.set_margin_bottom(0)
+        self.status_message.set_margin_start(6)
+        self.status_message.set_margin_end(6)
+        status_box.pack_start(self.status_message, True, True, 0)
+        
+        vbox.pack_start(status_box, False, False, 0)
         # Initialize Python environment status
         self.update_python_env_status()
 
@@ -136,7 +215,7 @@ class PythonRunnerApp(Gtk.Window):
         clipboard.set_text(code, -1)
 
         # Show a confirmation in the status bar
-        self.status_bar.push(0, "Code copied to clipboard")
+        self.status_message.set_text("Code copied to clipboard")
 
         # Remove the message after 1 second and restore the Python environment info
         threading.Timer(1.0, self.restore_python_env_status).start()
@@ -296,32 +375,24 @@ class PythonRunnerApp(Gtk.Window):
         return "python3"
 
     def update_python_env_status(self):
-        # Get the Python interpreter path
         python_interpreter = self.get_python_interpreter()
-
-        # Get the Python version
         try:
             result = subprocess.run(
                 [python_interpreter, "--version"],
                 capture_output=True,
                 text=True,
             )
-            if result.returncode == 0:
-                python_version = result.stdout.strip().replace("Python ", "")  # Extract version (e.g., "3.12.1")
-            else:
-                python_version = "Unknown"
+            python_version = result.stdout.strip().replace("Python ", "") if result.returncode == 0 else "Unknown"
         except Exception:
             python_version = "Unknown"
 
-        # Update the status bar
         if self.settings.get_boolean("use-custom-venv"):
             venv_folder = self.settings.get_string("venv-folder")
-            if venv_folder:
-                self.status_bar.push(0, f"Using Python ({python_version}) {venv_folder}")
-            else:
-                self.status_bar.push(0, "Custom venv not selected")
+            text = f"Using Python ({python_version}) {venv_folder}" if venv_folder else "Custom venv not selected"
         else:
-            self.status_bar.push(0, f"Using system Python ({python_version})")
+            text = f"Using system Python ({python_version})"
+            
+        self.status_label.set_text(text)
 
 if __name__ == "__main__":
     app = PythonRunnerApp()
