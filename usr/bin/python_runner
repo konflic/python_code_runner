@@ -7,13 +7,16 @@ import io
 import contextlib
 
 import gi
+
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "3.0")
 
 from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk
+from gi.repository import GLib
 
 
 INITIAL_SIZE = 700, 500
+
 
 class PythonRunnerApp(Gtk.Window):
 
@@ -36,7 +39,7 @@ class PythonRunnerApp(Gtk.Window):
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
         schema_source = Gio.SettingsSchemaSource.get_default()
@@ -47,7 +50,6 @@ class PythonRunnerApp(Gtk.Window):
         # Main vertical box
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.add(vbox)
-
 
         # Toolbar
         toolbar = Gtk.Toolbar()
@@ -78,8 +80,7 @@ class PythonRunnerApp(Gtk.Window):
         """
         css_provider.load_from_data(css.encode())
         toolbar.get_style_context().add_provider(
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
         # Run button
@@ -93,13 +94,13 @@ class PythonRunnerApp(Gtk.Window):
         copy_button = Gtk.ToolButton()
         copy_button.set_icon_name("edit-copy-symbolic")  # Default GTK copy icon
         copy_button.connect("clicked", self.on_copy_clicked)
-        toolbar.insert(copy_button, 1) 
+        toolbar.insert(copy_button, 1)
 
         # Settings button
         settings_button = Gtk.ToolButton()
         settings_button.set_icon_name("preferences-system-symbolic")  # Use an icon
         settings_button.connect("clicked", self.on_settings_clicked)
-        toolbar.insert(settings_button, -1) # Add to the end of the toolbar
+        toolbar.insert(settings_button, -1)  # Add to the end of the toolbar
         vbox.pack_start(toolbar, False, False, 0)
 
         # Export button
@@ -118,11 +119,16 @@ class PythonRunnerApp(Gtk.Window):
         # Syntax highlight
         self.code_buffer = GtkSource.Buffer()
         self.code_input.set_buffer(self.code_buffer)
+
+        self.setup_line_highlighting()
+
         language_manager = GtkSource.LanguageManager()
         python_language = language_manager.get_language("python")
         self.code_buffer.set_language(python_language)
         style_scheme_manager = GtkSource.StyleSchemeManager()
-        style_scheme = style_scheme_manager.get_scheme("solarized-dark")  # Use "tango" for a modern theme
+        style_scheme = style_scheme_manager.get_scheme(
+            "solarized-dark"
+        )  # Use "tango" for a modern theme
         self.code_buffer.set_style_scheme(style_scheme)
 
         self.code_input.set_wrap_mode(Gtk.WrapMode.WORD)
@@ -179,7 +185,7 @@ class PythonRunnerApp(Gtk.Window):
         status_box.set_border_width(0)
         status_box.set_margin_top(0)
         status_box.set_margin_bottom(5)
-        
+
         # Add the status context label
         self.status_label = Gtk.Label()
         self.status_label.set_margin_top(0)
@@ -187,74 +193,145 @@ class PythonRunnerApp(Gtk.Window):
         self.status_label.set_margin_start(6)
         self.status_label.set_margin_end(6)
         status_box.pack_start(self.status_label, False, False, 0)
-        
+
         # Add a small separator
         separator = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
         separator.set_margin_top(2)
         separator.set_margin_bottom(2)
         status_box.pack_start(separator, False, False, 0)
-        
+
         vbox.pack_start(status_box, False, False, 0)
         # Initialize Python environment status
         self.update_python_env_status()
 
         # Apply initial settings
         self.apply_settings()
-    
+
+    def setup_line_highlighting(self):
+        # Create a tag for highlighting the current line
+        highlight_color = Gdk.RGBA()
+        highlight_color.parse("#333333")  # Dark gray highlight
+
+        self.current_line_tag = self.code_buffer.create_tag(
+            "current_line",
+            background_rgba=highlight_color,
+            paragraph_background_rgba=highlight_color,
+            paragraph_background_set=True,
+        )
+
+        # Connect to all relevant signals
+        self.code_buffer.connect("mark-set", self.on_cursor_moved)
+        self.code_buffer.connect("changed", self.on_text_changed)
+        self.code_buffer.connect("insert-text", self.on_text_modified)
+        self.code_buffer.connect("delete-range", self.on_text_modified)
+
+        # Initial highlight
+        GLib.idle_add(self.highlight_current_line)
+
+    def on_cursor_moved(self, buffer, iter, mark, data=None):
+        if mark.get_name() == "insert":
+            GLib.idle_add(self.highlight_current_line)
+
+    def on_text_changed(self, buffer):
+        GLib.idle_add(self.highlight_current_line)
+
+    def on_text_modified(self, *args):
+        GLib.idle_add(self.highlight_current_line)
+
+    def highlight_current_line(self):
+        # Remove previous highlighting
+        self.code_buffer.remove_tag(
+            self.current_line_tag,
+            self.code_buffer.get_start_iter(),
+            self.code_buffer.get_end_iter(),
+        )
+
+        # Get cursor position
+        cursor_mark = self.code_buffer.get_insert()
+        cursor_iter = self.code_buffer.get_iter_at_mark(cursor_mark)
+        line_num = cursor_iter.get_line()
+
+        # Special handling for empty last line
+        if line_num == self.code_buffer.get_line_count() - 1:
+            # Create a temporary mark at the end to ensure we can highlight
+            end_mark = self.code_buffer.create_mark(
+                None, self.code_buffer.get_end_iter(), False
+            )
+
+            # Get line bounds
+            start_iter = self.code_buffer.get_iter_at_line(line_num)
+            end_iter = self.code_buffer.get_iter_at_mark(end_mark)
+
+            # Apply highlight
+            self.code_buffer.apply_tag(self.current_line_tag, start_iter, end_iter)
+
+            # Clean up
+            self.code_buffer.delete_mark(end_mark)
+        else:
+            # Normal line highlighting
+            start_iter = self.code_buffer.get_iter_at_line(line_num)
+            end_iter = start_iter.copy()
+            end_iter.forward_line()
+            self.code_buffer.apply_tag(self.current_line_tag, start_iter, end_iter)
+
+        # Ensure the line is visible
+        start_iter = self.code_buffer.get_iter_at_line(line_num)
+        self.code_input.scroll_to_iter(start_iter, 0.0, False, 0.0, 0.0)
+
     def on_export_clicked(self, widget):
         # Create a file chooser dialog
         dialog = Gtk.FileChooserDialog(
-            title="Export as index.py",
-            parent=self,
-            action=Gtk.FileChooserAction.SAVE
+            title="Export as index.py", parent=self, action=Gtk.FileChooserAction.SAVE
         )
-        
+
         # Add buttons using the modern method
         dialog.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_SAVE, Gtk.ResponseType.OK
+            Gtk.STOCK_CANCEL,
+            Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_SAVE,
+            Gtk.ResponseType.OK,
         )
-        
+
         # Rest of the method remains the same...
         # Set default filename
         dialog.set_current_name("index.py")
-        
+
         # Add Python file filter
         py_filter = Gtk.FileFilter()
         py_filter.set_name("Python files")
         py_filter.add_pattern("*.py")
         dialog.add_filter(py_filter)
-        
+
         # Add all files filter
         all_filter = Gtk.FileFilter()
         all_filter.set_name("All files")
         all_filter.add_pattern("*")
         dialog.add_filter(all_filter)
-        
+
         response = dialog.run()
-        
+
         if response == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
             # Ensure .py extension if not present
-            if not filename.endswith('.py'):
-                filename += '.py'
-            
+            if not filename.endswith(".py"):
+                filename += ".py"
+
             # Get the code from the input area
             code_buffer = self.code_input.get_buffer()
             start_iter = code_buffer.get_start_iter()
             end_iter = code_buffer.get_end_iter()
             code = code_buffer.get_text(start_iter, end_iter, False)
-            
+
             try:
-                with open(filename, 'w') as f:
+                with open(filename, "w") as f:
                     f.write(code)
                 self.status_label.set_text(f"Code exported to {filename}")
             except Exception as e:
                 self.status_label.set_text(f"Error saving file: {str(e)}")
-            
+
             # Remove the message after 3 seconds
             threading.Timer(3.0, self.restore_python_env_status).start()
-        
+
         dialog.destroy()
 
     def on_copy_clicked(self, widget):
@@ -311,7 +388,9 @@ class PythonRunnerApp(Gtk.Window):
     def on_settings_clicked(self, widget):
         # Create a settings dialog
         dialog = Gtk.Dialog(title="Settings", parent=self, flags=0)
-        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK
+        )
         dialog.set_default_size(300, 200)
         dialog.set_resizable(False)  # Prevent resizing
 
@@ -320,10 +399,14 @@ class PythonRunnerApp(Gtk.Window):
         dialog.get_content_area().add(vbox)
 
         # Draw whitespaces toggle
-        draw_whitespaces_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        draw_whitespaces_hbox = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12
+        )
         draw_whitespaces_label = Gtk.Label(label="Draw Whitespaces:")
         self.draw_whitespaces_switch = Gtk.Switch()
-        self.draw_whitespaces_switch.set_active(self.settings.get_boolean("draw-whitespaces"))
+        self.draw_whitespaces_switch.set_active(
+            self.settings.get_boolean("draw-whitespaces")
+        )
         draw_whitespaces_hbox.pack_start(draw_whitespaces_label, True, True, 0)
         draw_whitespaces_hbox.pack_end(self.draw_whitespaces_switch, False, False, 0)
         vbox.pack_start(draw_whitespaces_hbox, False, False, 0)
@@ -338,25 +421,35 @@ class PythonRunnerApp(Gtk.Window):
         vbox.pack_start(tab_size_hbox, False, False, 0)
 
         # Translate tabs to spaces toggle
-        translate_tabs_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        translate_tabs_hbox = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12
+        )
         translate_tabs_label = Gtk.Label(label="Translate Tabs to Spaces:")
         self.translate_tabs_switch = Gtk.Switch()
-        self.translate_tabs_switch.set_active(self.settings.get_boolean("translate-tabs"))
+        self.translate_tabs_switch.set_active(
+            self.settings.get_boolean("translate-tabs")
+        )
         translate_tabs_hbox.pack_start(translate_tabs_label, True, True, 0)
         translate_tabs_hbox.pack_end(self.translate_tabs_switch, False, False, 0)
         vbox.pack_start(translate_tabs_hbox, False, False, 0)
 
         # Use custom venv toggle
-        use_custom_venv_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        use_custom_venv_hbox = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12
+        )
         use_custom_venv_label = Gtk.Label(label="Use Custom Venv:")
         self.use_custom_venv_switch = Gtk.Switch()
-        self.use_custom_venv_switch.set_active(self.settings.get_boolean("use-custom-venv"))
+        self.use_custom_venv_switch.set_active(
+            self.settings.get_boolean("use-custom-venv")
+        )
         use_custom_venv_hbox.pack_start(use_custom_venv_label, True, True, 0)
         use_custom_venv_hbox.pack_end(self.use_custom_venv_switch, False, False, 0)
         vbox.pack_start(use_custom_venv_hbox, False, False, 0)
 
         # Connect signal to the "Use Custom Venv" switch
-        self.use_custom_venv_switch.connect("state-set", self.on_use_custom_venv_toggled, dialog)
+        self.use_custom_venv_switch.connect(
+            "state-set", self.on_use_custom_venv_toggled, dialog
+        )
 
         # Show the dialog
         dialog.show_all()
@@ -364,10 +457,16 @@ class PythonRunnerApp(Gtk.Window):
 
         # Save settings if OK is clicked
         if response == Gtk.ResponseType.OK:
-            self.settings.set_boolean("draw-whitespaces", self.draw_whitespaces_switch.get_active())
+            self.settings.set_boolean(
+                "draw-whitespaces", self.draw_whitespaces_switch.get_active()
+            )
             self.settings.set_int("tab-size", self.tab_size_spin.get_value_as_int())
-            self.settings.set_boolean("translate-tabs", self.translate_tabs_switch.get_active())
-            self.settings.set_boolean("use-custom-venv", self.use_custom_venv_switch.get_active())
+            self.settings.set_boolean(
+                "translate-tabs", self.translate_tabs_switch.get_active()
+            )
+            self.settings.set_boolean(
+                "use-custom-venv", self.use_custom_venv_switch.get_active()
+            )
 
             # Update Python environment status
             self.update_python_env_status()
@@ -382,7 +481,12 @@ class PythonRunnerApp(Gtk.Window):
                 parent=dialog,
                 action=Gtk.FileChooserAction.SELECT_FOLDER,
             )
-            folder_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+            folder_dialog.add_buttons(
+                Gtk.STOCK_CANCEL,
+                Gtk.ResponseType.CANCEL,
+                Gtk.STOCK_OK,
+                Gtk.ResponseType.OK,
+            )
             response = folder_dialog.run()
             if response == Gtk.ResponseType.OK:
                 venv_folder = folder_dialog.get_filename()
@@ -399,10 +503,12 @@ class PythonRunnerApp(Gtk.Window):
         if self.settings.get_boolean("draw-whitespaces"):
             self.space_drawer.set_types_for_locations(
                 GtkSource.SpaceLocationFlags.ALL,
-                GtkSource.SpaceTypeFlags.SPACE | GtkSource.SpaceTypeFlags.TAB
+                GtkSource.SpaceTypeFlags.SPACE | GtkSource.SpaceTypeFlags.TAB,
             )
         else:
-            self.space_drawer.set_types_for_locations(GtkSource.SpaceLocationFlags.ALL, 0)
+            self.space_drawer.set_types_for_locations(
+                GtkSource.SpaceLocationFlags.ALL, 0
+            )
 
         # Apply tab size setting
         tab_size = self.settings.get_int("tab-size")
@@ -436,17 +542,26 @@ class PythonRunnerApp(Gtk.Window):
                 capture_output=True,
                 text=True,
             )
-            python_version = result.stdout.strip().replace("Python ", "") if result.returncode == 0 else "Unknown"
+            python_version = (
+                result.stdout.strip().replace("Python ", "")
+                if result.returncode == 0
+                else "Unknown"
+            )
         except Exception:
             python_version = "Unknown"
 
         if self.settings.get_boolean("use-custom-venv"):
             venv_folder = self.settings.get_string("venv-folder")
-            text = f"Using Python ({python_version}) {venv_folder}" if venv_folder else "Custom venv not selected"
+            text = (
+                f"Using Python ({python_version}) {venv_folder}"
+                if venv_folder
+                else "Custom venv not selected"
+            )
         else:
             text = f"Using system Python ({python_version})"
-            
+
         self.status_label.set_text(text)
+
 
 if __name__ == "__main__":
     app = PythonRunnerApp()
