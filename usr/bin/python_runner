@@ -102,6 +102,12 @@ class PythonRunnerApp(Gtk.Window):
         toolbar.insert(settings_button, -1) # Add to the end of the toolbar
         vbox.pack_start(toolbar, False, False, 0)
 
+        # Export button
+        export_button = Gtk.ToolButton()
+        export_button.set_icon_name("document-save-as-symbolic")  # GTK save icon
+        export_button.connect("clicked", self.on_export_clicked)
+        toolbar.insert(export_button, 2)  # Insert after copy button
+
         # Create a Paned widget to allow resizing
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         vbox.pack_start(self.paned, True, True, 0)
@@ -188,20 +194,68 @@ class PythonRunnerApp(Gtk.Window):
         separator.set_margin_bottom(2)
         status_box.pack_start(separator, False, False, 0)
         
-        # Add the message label
-        self.status_message = Gtk.Label()
-        self.status_message.set_margin_top(0)
-        self.status_message.set_margin_bottom(0)
-        self.status_message.set_margin_start(6)
-        self.status_message.set_margin_end(6)
-        status_box.pack_start(self.status_message, True, True, 0)
-        
         vbox.pack_start(status_box, False, False, 0)
         # Initialize Python environment status
         self.update_python_env_status()
 
         # Apply initial settings
         self.apply_settings()
+    
+    def on_export_clicked(self, widget):
+        # Create a file chooser dialog
+        dialog = Gtk.FileChooserDialog(
+            title="Export as index.py",
+            parent=self,
+            action=Gtk.FileChooserAction.SAVE
+        )
+        
+        # Add buttons using the modern method
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_SAVE, Gtk.ResponseType.OK
+        )
+        
+        # Rest of the method remains the same...
+        # Set default filename
+        dialog.set_current_name("index.py")
+        
+        # Add Python file filter
+        py_filter = Gtk.FileFilter()
+        py_filter.set_name("Python files")
+        py_filter.add_pattern("*.py")
+        dialog.add_filter(py_filter)
+        
+        # Add all files filter
+        all_filter = Gtk.FileFilter()
+        all_filter.set_name("All files")
+        all_filter.add_pattern("*")
+        dialog.add_filter(all_filter)
+        
+        response = dialog.run()
+        
+        if response == Gtk.ResponseType.OK:
+            filename = dialog.get_filename()
+            # Ensure .py extension if not present
+            if not filename.endswith('.py'):
+                filename += '.py'
+            
+            # Get the code from the input area
+            code_buffer = self.code_input.get_buffer()
+            start_iter = code_buffer.get_start_iter()
+            end_iter = code_buffer.get_end_iter()
+            code = code_buffer.get_text(start_iter, end_iter, False)
+            
+            try:
+                with open(filename, 'w') as f:
+                    f.write(code)
+                self.status_label.set_text(f"Code exported to {filename}")
+            except Exception as e:
+                self.status_label.set_text(f"Error saving file: {str(e)}")
+            
+            # Remove the message after 3 seconds
+            threading.Timer(3.0, self.restore_python_env_status).start()
+        
+        dialog.destroy()
 
     def on_copy_clicked(self, widget):
         # Get the code from the input area
@@ -215,10 +269,10 @@ class PythonRunnerApp(Gtk.Window):
         clipboard.set_text(code, -1)
 
         # Show a confirmation in the status bar
-        self.status_message.set_text("Code copied to clipboard")
+        self.status_label.set_text("Code copied to clipboard")
 
         # Remove the message after 1 second and restore the Python environment info
-        threading.Timer(1.0, self.restore_python_env_status).start()
+        threading.Timer(3.0, self.restore_python_env_status).start()
 
     def restore_python_env_status(self):
         # Restore the Python environment status in the status bar
