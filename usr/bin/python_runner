@@ -18,7 +18,7 @@ INITIAL_SIZE = 700, 500
 class PythonRunnerApp(Gtk.Window):
     def __init__(self):
         Gtk.Window.__init__(self, title="Python Runner")
-        self.set_default_size(600, 400)
+        self.set_default_size(*INITIAL_SIZE)
 
         schema_source = Gio.SettingsSchemaSource.get_default()
         schema = schema_source.lookup("com.example.python-runner", False)
@@ -38,7 +38,8 @@ class PythonRunnerApp(Gtk.Window):
         vbox.pack_start(toolbar, False, False, 0)
 
         # Run button
-        run_button = Gtk.ToolButton(label="RUN")
+        run_button = Gtk.ToolButton()
+        run_button.set_icon_name("media-playback-start-symbolic")  # GTK play icon
         run_button.connect("clicked", self.on_run_clicked)
         toolbar.insert(run_button, 1)
 
@@ -111,7 +112,7 @@ class PythonRunnerApp(Gtk.Window):
         self.paned.add2(scrolled_output)  # Add output area to the bottom pane
 
         # Set initial height of half initial window size
-        self.paned.set_position(INITIAL_SIZE[1] // 2 - 100)
+        self.paned.set_position(INITIAL_SIZE[1] // 2 - 50)
 
         # Status bar
         self.status_bar = Gtk.Statusbar()
@@ -324,6 +325,7 @@ class PythonRunnerApp(Gtk.Window):
 
 if __name__ == "__main__":
     app = PythonRunnerApp()
+    app.set_position(Gtk.WindowPosition.CENTER)
     app.connect("destroy", Gtk.main_quit)
     app.show_all()
     Gtk.main()
