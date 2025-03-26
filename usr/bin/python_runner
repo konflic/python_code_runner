@@ -29,6 +29,7 @@ SETTING_USE_CUSTOM_VENV = "use-custom-venv"
 SETTING_VENV_FOLDER = "venv-folder"
 SETTING_COLOR_SCHEME_ID = "color-scheme-id"
 CACHE_FILE_NAME = "python_runner_code_cache.txt"
+EXECUTION_TIMEOUT = 30
 # --- End Constants ---
 
 
@@ -346,7 +347,7 @@ class PythonRunnerApp(Gtk.Window):
                 capture_output=True,
                 text=True,
                 check=False,  # Don't raise exception on non-zero exit code
-                timeout=30,  # Add a timeout (e.g., 30 seconds)
+                timeout=EXECUTION_TIMEOUT,  # Add a timeout (e.g., 30 seconds)
             )
             if result.returncode == 0:
                 output = result.stdout
@@ -359,9 +360,9 @@ class PythonRunnerApp(Gtk.Window):
                 )
 
         except FileNotFoundError:
-            error = f"Error: Python interpreter '{python_interpreter}' not found."
+            error = f"Error: Python interpreter '{python_interpreter}' not found"
         except subprocess.TimeoutExpired:
-            error = "Error: Code execution timed out."
+            error = "Error: Code execution timed out"
         except Exception as e:
             error = f"Error executing code: {e}"
 
@@ -382,7 +383,7 @@ class PythonRunnerApp(Gtk.Window):
         end_iter = self.output_buffer.get_end_iter()
         self.output_view.scroll_to_iter(end_iter, 0.0, False, 0.0, 0.0)
 
-        status_msg = "Execution finished." if success else "Execution failed."
+        status_msg = "Execution finished" if success else "Execution failed"
         self._set_status_message(status_msg, temporary=True)
 
         # Re-enable the run button
@@ -428,9 +429,9 @@ class PythonRunnerApp(Gtk.Window):
         if code:
             clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
             clipboard.set_text(code, -1)
-            self._set_status_message("Code copied to clipboard.", temporary=True)
+            self._set_status_message("Code copied to clipboard", temporary=True)
         else:
-            self._set_status_message("Nothing to copy.", temporary=True)
+            self._set_status_message("Nothing to copy", temporary=True)
 
     def on_export_clicked(self, widget):
         """Handles the Export button click."""
@@ -504,7 +505,7 @@ class PythonRunnerApp(Gtk.Window):
                 error_dialog.run()
                 error_dialog.destroy()
                 self._set_status_message(
-                    f"Error saving file.", temporary=True
+                    f"Error saving file", temporary=True
                 )  # Also update status bar
 
         dialog.destroy()
