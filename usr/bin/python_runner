@@ -434,17 +434,28 @@ class PythonRunnerApp(Gtk.Window):
 
     def on_export_clicked(self, widget):
         """Handles the Export button click."""
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        if not code.strip():
+            self._set_status_message("No code to save", temporary=True)
+            return
+        
         dialog = Gtk.FileChooserDialog(
             title="Export Code As...",
             parent=self,
             action=Gtk.FileChooserAction.SAVE,
         )
+
         dialog.add_buttons(
             "_Cancel",
             Gtk.ResponseType.CANCEL,  # Use underscore for mnemonic
             "_Save",
             Gtk.ResponseType.OK,
         )
+    
         dialog.set_do_overwrite_confirmation(True)
         dialog.set_current_name("script.py")  # More generic default
 
@@ -462,6 +473,7 @@ class PythonRunnerApp(Gtk.Window):
 
         response = dialog.run()
         filename = None
+
         if response == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
             # Ensure .py extension if not present and Python filter is active
@@ -470,11 +482,6 @@ class PythonRunnerApp(Gtk.Window):
                 and dialog.get_filter() == py_filter
             ):
                 filename += ".py"
-
-            code_buffer = self.code_input.get_buffer()
-            start_iter = code_buffer.get_start_iter()
-            end_iter = code_buffer.get_end_iter()
-            code = code_buffer.get_text(start_iter, end_iter, False)
 
             try:
                 with open(filename, "w", encoding="utf-8") as f:
