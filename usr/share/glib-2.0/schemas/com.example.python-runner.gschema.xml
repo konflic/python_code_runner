@@ -25,5 +25,10 @@
       <summary>Venv Folder</summary>
       <description>Path to the custom virtual environment folder.</description>
     </key>
+    <key name="color-scheme-id" type="s">
+      <default>'solarized-dark'</default> <!-- Or your preferred default -->
+      <summary>GtkSourceView Color Scheme ID</summary>
+      <description>The ID of the color scheme to use for syntax highlighting in the code editor.</description>
+    </key>
     </schema>
   </schemalist>
