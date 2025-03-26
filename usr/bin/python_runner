@@ -28,6 +28,7 @@ SETTING_TRANSLATE_TABS = "translate-tabs"
 SETTING_USE_CUSTOM_VENV = "use-custom-venv"
 SETTING_VENV_FOLDER = "venv-folder"
 SETTING_COLOR_SCHEME_ID = "color-scheme-id"
+CACHE_FILE_NAME = "python_runner_code_cache.txt"
 # --- End Constants ---
 
 
@@ -41,18 +42,63 @@ class PythonRunnerApp(Gtk.Window):
         self.set_default_size(INITIAL_WIDTH, INITIAL_HEIGHT)
         self.set_size_request(INITIAL_WIDTH, INITIAL_HEIGHT)  # Minimum size
         self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("destroy", self.on_destroy)
         self.connect("destroy", Gtk.main_quit)
-
         self._status_timeout_id = None
         self.run_button = None  # To enable/disable during execution
 
         self._setup_settings()
         self._setup_css()  # CSS needs to be setup before UI elements that use names/classes
         self._setup_ui()
+
+        self.cache_file_path = self._get_cache_file_path()
+        self._load_code_from_cache()  # Load from cache
+
         self.apply_settings()  # Apply initial settings from schema
         self.update_python_env_status()  # Initial status update
 
         self.show_all()
+    
+    def on_destroy(self, _):
+        self._save_code_to_cache()
+
+    def _get_cache_file_path(self):
+        """Gets the path to the cache file in the user's cache directory."""
+        cache_dir = GLib.get_user_cache_dir()
+        if not cache_dir:
+            cache_dir = "."
+        return os.path.join(cache_dir, CACHE_FILE_NAME)
+
+    def _save_code_to_cache(self):
+        """Saves the current code to the cache file."""
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        try:
+            # Ensure the cache directory exists
+            cache_dir = os.path.dirname(self.cache_file_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(self.cache_file_path, "w", encoding="utf-8") as f:
+                f.write(code)
+            print(f"Code saved to cahce {self.cache_file_path}")
+            return True  # Keep the timer running
+        except Exception as e:
+            print(f"Error saving to cache: {e}", file=sys.stderr)
+            return True #Keep the timer running - try again
+
+    def _load_code_from_cache(self):
+        """Loads code from the cache file, if it exists."""
+        try:
+            if os.path.exists(self.cache_file_path):
+                with open(self.cache_file_path, "r", encoding="utf-8") as f:
+                    code = f.read()
+                self.code_buffer.set_text(code, -1)
+                self._set_status_message("Code loaded from cache.", temporary=True)
+        except Exception as e:
+            print(f"Error loading from cache: {e}", file=sys.stderr)
+            self._set_status_message("Error loading code from cache.", temporary=True)
 
     def _setup_settings(self):
         """Initializes GSettings."""
