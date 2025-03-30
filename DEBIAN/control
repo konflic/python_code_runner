@@ -1,8 +1,0 @@
-Package: python-runner
-Version: 1.0
-Section: utils
-Priority: optional
-Architecture: all
-Maintainer: Mikhail C. <konflic@mail.ru>
-Description: A lightweight Python code runner for GNOME.
- This application allows you to write and run Python code directly in a GNOME environment.

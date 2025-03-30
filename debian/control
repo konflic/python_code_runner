@@ -1,0 +1,18 @@
+Source: python-runner
+Section: python
+Priority: optional
+Maintainer: Mikhail Ch. <konflic@mail.ru>
+Build-Depends: debhelper-compat (= 13), dh-python, python3-all, python3-setuptools
+Standards-Version: 4.6.0
+Homepage: https://github.com/konflic/python_runner
+Rules-Requires-Root: no
+
+Package: python-runner
+Architecture: all
+Depends: ${python3:Depends}, ${misc:Depends}, python3-gi, gir1.2-gtk-3.0, libglib2.0-bin
+Description: Python script runner with GUI
+ A GTK3 application for running Python scripts with a friendly interface.
+ Features include:
+  - Easy script execution
+  - Output display
+  - Customizable settings

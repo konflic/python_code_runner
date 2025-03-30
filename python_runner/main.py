@@ -7,6 +7,8 @@ import sys
 
 import gi
 
+from python_runner.version import VERSION
+
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "3.0")
 
@@ -28,31 +30,80 @@ SETTING_TRANSLATE_TABS = "translate-tabs"
 SETTING_USE_CUSTOM_VENV = "use-custom-venv"
 SETTING_VENV_FOLDER = "venv-folder"
 SETTING_COLOR_SCHEME_ID = "color-scheme-id"
+CACHE_FILE_NAME = "python_runner_code_cache.txt"
+EXECUTION_TIMEOUT = 30
 # --- End Constants ---
 
 
 class PythonRunnerApp(Gtk.Window):
     """
-    A simple GTK application to write and run Python code snippets.
+    A simple GTK application to write and run Python code snippets, now without a toolbar.
+    All functionality is accessed via hotkeys.
     """
 
     def __init__(self):
-        Gtk.Window.__init__(self, title="Python Runner")
+        Gtk.Window.__init__(self, title=f"Python Runner {VERSION}")
         self.set_default_size(INITIAL_WIDTH, INITIAL_HEIGHT)
         self.set_size_request(INITIAL_WIDTH, INITIAL_HEIGHT)  # Minimum size
         self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("destroy", self.on_destroy)
         self.connect("destroy", Gtk.main_quit)
-
         self._status_timeout_id = None
-        self.run_button = None  # To enable/disable during execution
 
         self._setup_settings()
         self._setup_css()  # CSS needs to be setup before UI elements that use names/classes
         self._setup_ui()
+        self._setup_hotkeys()  # Setup hotkeys after UI
+
+        self.cache_file_path = self._get_cache_file_path()
+        self._load_code_from_cache()  # Load from cache
+
         self.apply_settings()  # Apply initial settings from schema
         self.update_python_env_status()  # Initial status update
+        self.on_show_hotkeys()
 
         self.show_all()
+
+    def on_destroy(self, _):
+        self._save_code_to_cache()
+
+    def _get_cache_file_path(self):
+        """Gets the path to the cache file in the user's cache directory."""
+        cache_dir = GLib.get_user_cache_dir()
+        if not cache_dir:
+            cache_dir = "."
+        return os.path.join(cache_dir, CACHE_FILE_NAME)
+
+    def _save_code_to_cache(self):
+        """Saves the current code to the cache file."""
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        try:
+            # Ensure the cache directory exists
+            cache_dir = os.path.dirname(self.cache_file_path)
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(self.cache_file_path, "w", encoding="utf-8") as f:
+                f.write(code)
+            print(f"Code saved to cahce {self.cache_file_path}")
+            return True  # Keep the timer running
+        except Exception as e:
+            print(f"Error saving to cache: {e}", file=sys.stderr)
+            return True  # Keep the timer running - try again
+
+    def _load_code_from_cache(self):
+        """Loads code from the cache file, if it exists."""
+        try:
+            if os.path.exists(self.cache_file_path):
+                with open(self.cache_file_path, "r", encoding="utf-8") as f:
+                    code = f.read()
+                self.code_buffer.set_text(code, -1)
+                self._set_status_message("Code loaded from cache.", temporary=True)
+        except Exception as e:
+            print(f"Error loading from cache: {e}", file=sys.stderr)
+            self._set_status_message("Error loading code from cache.", temporary=True)
 
     def _setup_settings(self):
         """Initializes GSettings."""
@@ -85,32 +136,8 @@ class PythonRunnerApp(Gtk.Window):
     def _setup_css(self):
         """Loads and applies CSS styles."""
         css_provider = Gtk.CssProvider()
-        # --- Restore original CSS for green run button image ---
+        # --- CSS (removed toolbar styles) ---
         css = f"""
-        #run-button image {{
-            color: #2ECC71; /* Green color for the icon */
-        }}
-        #run-button:hover image {{
-            color: #27AE60; /* Darker green on hover */
-        }}
-        #run-button:disabled image {{
-             color: alpha(#888888, 0.7); /* Example disabled color */
-        }}
-        toolbar {{
-            -GtkToolbar-button-relief: none;
-            padding: 0px;
-            margin: 5px 2px 0 2px;
-            border-width: 0px;
-        }}
-        toolbar button {{
-            margin: 5px 2px 0 2px;
-            padding: 0px;
-            border-radius: 0px;
-        }}
-        toolbar button image {{
-            padding: 0px; /* Keep this to avoid extra padding */
-            margin: 0px;
-        }}
         /* Style for the current line highlight (built-in) */
         textview text selection:focus, textview text selection {{
             background-color: alpha(#333333, 0.5); /* Example semi-transparent highlight */
@@ -124,12 +151,14 @@ class PythonRunnerApp(Gtk.Window):
         )
 
     def _setup_ui(self):
-        """Builds the main UI structure."""
+        """Builds the main UI structure (toolbar removed)."""
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.add(vbox)
 
-        toolbar = self._setup_toolbar()
-        vbox.pack_start(toolbar, False, False, 0)
+        # Toolbar is removed from here
+        # toolbar = self._setup_toolbar()
+        # vbox.pack_start(toolbar, False, False, 0)
+        # toolbar.set_visible(False)
 
         self.paned = self._setup_panes_and_views()
         vbox.pack_start(self.paned, True, True, 0)
@@ -137,68 +166,53 @@ class PythonRunnerApp(Gtk.Window):
         status_box = self._setup_statusbar()
         vbox.pack_start(status_box, False, False, 0)
 
-    def _setup_toolbar(self):
-        """Creates and configures the toolbar."""
-        toolbar = Gtk.Toolbar()
-
-        # Run button
-        self.run_button = Gtk.ToolButton()  # No label needed if only icon
-        self.run_button.set_icon_name("media-playback-start-symbolic")
-        self.run_button.set_name("run-button")  # For CSS targeting
-        self.run_button.set_tooltip_text("Run Python Code (Ctrl+R)")
-        self.run_button.connect("clicked", self.on_run_clicked)
-        toolbar.insert(self.run_button, 0)
-
-        # Copy button
-        copy_button = Gtk.ToolButton()
-        copy_button.set_icon_name("edit-copy-symbolic")
-        copy_button.set_tooltip_text("Copy Code to Clipboard (Ctrl+C)")
-        copy_button.connect("clicked", self.on_copy_clicked)
-        toolbar.insert(copy_button, 1)
-
-        # Export button
-        export_button = Gtk.ToolButton()
-        export_button.set_icon_name("document-save-as-symbolic")
-        export_button.set_tooltip_text("Export Code to File (Ctrl+S)")
-        export_button.connect("clicked", self.on_export_clicked)
-        toolbar.insert(export_button, 2)
-
-        # Settings button (usually placed at the end)
-        settings_button = Gtk.ToolButton()
-        settings_button.set_icon_name("preferences-system-symbolic")
-        settings_button.set_tooltip_text("Application Settings")
-        settings_button.connect("clicked", self.on_settings_clicked)
-        toolbar.insert(settings_button, -1)  # Insert at the end
-
-        # --- Keyboard Accelerators ---
+    def _setup_hotkeys(self):
+        """Sets up global hotkeys for application actions."""
         accel_group = Gtk.AccelGroup()
         self.add_accel_group(accel_group)
+
         # Ctrl+R for Run
-        self.run_button.add_accelerator(
-            "clicked",
-            accel_group,
+        accel_group.connect(
             Gdk.KEY_R,
             Gdk.ModifierType.CONTROL_MASK,
             Gtk.AccelFlags.VISIBLE,
+            self.on_run_clicked,
         )
-        # Ctrl+C for Copy (Note: TextView might handle this, but this ensures toolbar button works)
-        copy_button.add_accelerator(
-            "clicked",
-            accel_group,
+        # Ctrl+C for Copy
+        accel_group.connect(
             Gdk.KEY_C,
             Gdk.ModifierType.CONTROL_MASK,
             Gtk.AccelFlags.VISIBLE,
+            self.on_copy_clicked,
         )
         # Ctrl+S for Save/Export
-        export_button.add_accelerator(
-            "clicked",
-            accel_group,
+        accel_group.connect(
             Gdk.KEY_S,
             Gdk.ModifierType.CONTROL_MASK,
             Gtk.AccelFlags.VISIBLE,
+            self.on_export_clicked,
         )
-
-        return toolbar
+        # Ctrl+T for Settings
+        accel_group.connect(
+            Gdk.KEY_T,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_settings_clicked,
+        )
+        # Ctrl+, for Settings (Alternative)
+        accel_group.connect(
+            Gdk.KEY_comma,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_settings_clicked,
+        )
+        # Ctrl+H for Help (Show Hotkeys)
+        accel_group.connect(
+            Gdk.KEY_H,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_show_hotkeys,
+        )
 
     def _setup_panes_and_views(self):
         """Creates the Paned widget and the code/output views."""
@@ -223,9 +237,7 @@ class PythonRunnerApp(Gtk.Window):
         self.code_input.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.code_input.set_monospace(True)
         self.code_input.set_show_line_numbers(True)
-        self.code_input.set_highlight_current_line(
-            True
-        )  # Use built-in if theme supports it
+        self.code_input.set_highlight_current_line(True)
         self.code_input.set_auto_indent(True)
         self.code_input.set_indent_on_tab(True)
 
@@ -267,7 +279,7 @@ class PythonRunnerApp(Gtk.Window):
         paned.add2(scrolled_output)  # Add output area to the bottom pane
 
         # Set initial pane position (roughly half)
-        paned.set_position(INITIAL_HEIGHT // 2 - 50)
+        paned.set_position(INITIAL_HEIGHT // 2)
 
         return paned
 
@@ -287,7 +299,6 @@ class PythonRunnerApp(Gtk.Window):
         return status_box
 
     # --- Event Handlers ---
-
     def _run_code_thread(self, code, python_interpreter):
         """Worker thread function to execute Python code."""
         output = ""
@@ -300,7 +311,7 @@ class PythonRunnerApp(Gtk.Window):
                 capture_output=True,
                 text=True,
                 check=False,  # Don't raise exception on non-zero exit code
-                timeout=30,  # Add a timeout (e.g., 30 seconds)
+                timeout=EXECUTION_TIMEOUT,  # Add a timeout (e.g., 30 seconds)
             )
             if result.returncode == 0:
                 output = result.stdout
@@ -313,9 +324,9 @@ class PythonRunnerApp(Gtk.Window):
                 )
 
         except FileNotFoundError:
-            error = f"Error: Python interpreter '{python_interpreter}' not found."
+            error = f"Error: Python interpreter '{python_interpreter}' not found"
         except subprocess.TimeoutExpired:
-            error = "Error: Code execution timed out."
+            error = "Error: Code execution timed out"
         except Exception as e:
             error = f"Error executing code: {e}"
 
@@ -336,17 +347,15 @@ class PythonRunnerApp(Gtk.Window):
         end_iter = self.output_buffer.get_end_iter()
         self.output_view.scroll_to_iter(end_iter, 0.0, False, 0.0, 0.0)
 
-        status_msg = "Execution finished." if success else "Execution failed."
+        status_msg = "Execution finished" if success else "Execution failed"
         self._set_status_message(status_msg, temporary=True)
-
-        # Re-enable the run button
-        if self.run_button:
-            self.run_button.set_sensitive(True)
 
         return GLib.SOURCE_REMOVE  # Indicate the idle task is done
 
-    def on_run_clicked(self, widget):
-        """Handles the Run button click."""
+    def on_run_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
+        """Handles the Run action, triggered by hotkey (Ctrl+R)."""
         code_buffer = self.code_input.get_buffer()
         start_iter = code_buffer.get_start_iter()
         end_iter = code_buffer.get_end_iter()
@@ -358,8 +367,7 @@ class PythonRunnerApp(Gtk.Window):
 
         python_interpreter = self.get_python_interpreter()
 
-        # Disable run button and show status
-        widget.set_sensitive(False)
+        # Set status and clear output
         self._set_status_message(
             f"Running with {os.path.basename(python_interpreter)}..."
         )
@@ -372,8 +380,10 @@ class PythonRunnerApp(Gtk.Window):
         thread.daemon = True  # Allow app to exit even if thread is running
         thread.start()
 
-    def on_copy_clicked(self, widget):
-        """Handles the Copy button click."""
+    def on_copy_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
+        """Handles the Copy action, triggered by hotkey (Ctrl+C)."""
         code_buffer = self.code_input.get_buffer()
         start_iter = code_buffer.get_start_iter()
         end_iter = code_buffer.get_end_iter()
@@ -382,23 +392,36 @@ class PythonRunnerApp(Gtk.Window):
         if code:
             clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
             clipboard.set_text(code, -1)
-            self._set_status_message("Code copied to clipboard.", temporary=True)
+            self._set_status_message("Code copied to clipboard", temporary=True)
         else:
-            self._set_status_message("Nothing to copy.", temporary=True)
+            self._set_status_message("Nothing to copy", temporary=True)
 
-    def on_export_clicked(self, widget):
-        """Handles the Export button click."""
+    def on_export_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
+        """Handles the Export action, triggered by hotkey (Ctrl+S)."""
+        code_buffer = self.code_input.get_buffer()
+        start_iter = code_buffer.get_start_iter()
+        end_iter = code_buffer.get_end_iter()
+        code = code_buffer.get_text(start_iter, end_iter, False)
+
+        if not code.strip():
+            self._set_status_message("No code to save", temporary=True)
+            return
+
         dialog = Gtk.FileChooserDialog(
             title="Export Code As...",
             parent=self,
             action=Gtk.FileChooserAction.SAVE,
         )
+
         dialog.add_buttons(
             "_Cancel",
             Gtk.ResponseType.CANCEL,  # Use underscore for mnemonic
             "_Save",
             Gtk.ResponseType.OK,
         )
+
         dialog.set_do_overwrite_confirmation(True)
         dialog.set_current_name("script.py")  # More generic default
 
@@ -416,6 +439,7 @@ class PythonRunnerApp(Gtk.Window):
 
         response = dialog.run()
         filename = None
+
         if response == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
             # Ensure .py extension if not present and Python filter is active
@@ -424,11 +448,6 @@ class PythonRunnerApp(Gtk.Window):
                 and dialog.get_filter() == py_filter
             ):
                 filename += ".py"
-
-            code_buffer = self.code_input.get_buffer()
-            start_iter = code_buffer.get_start_iter()
-            end_iter = code_buffer.get_end_iter()
-            code = code_buffer.get_text(start_iter, end_iter, False)
 
             try:
                 with open(filename, "w", encoding="utf-8") as f:
@@ -451,13 +470,15 @@ class PythonRunnerApp(Gtk.Window):
                 error_dialog.run()
                 error_dialog.destroy()
                 self._set_status_message(
-                    f"Error saving file.", temporary=True
+                    f"Error saving file", temporary=True
                 )  # Also update status bar
 
         dialog.destroy()
 
-    def on_settings_clicked(self, widget):
-        """Shows the settings dialog (using original Box layout)."""
+    def on_settings_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
+        """Shows the settings dialog, triggered by hotkey (Ctrl+T or Ctrl+,)."""
         dialog = Gtk.Dialog(title="Settings", parent=self, flags=0)
         dialog.add_buttons(
             Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK
@@ -628,6 +649,25 @@ class PythonRunnerApp(Gtk.Window):
         # Update python env status only if relevant keys changed
         if key in [SETTING_USE_CUSTOM_VENV, SETTING_VENV_FOLDER]:
             self.update_python_env_status()
+
+    def on_show_hotkeys(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
+        """Displays a list of available hotkeys in the output window."""
+        hotkey_list = """
+    --- Hotkeys ---
+    Ctrl+R: Run Code
+    Ctrl+C: Copy Code
+    Ctrl+S: Export Code to File
+    Ctrl+T or Ctrl+,: Open Settings
+    Ctrl+H: Show Hotkeys (this list)
+    ---
+    """
+        self.output_buffer.set_text(hotkey_list)
+        # Scroll to the top to see the help message clearly
+        start_iter = self.output_buffer.get_start_iter()
+        self.output_view.scroll_to_iter(start_iter, 0.0, False, 0.0, 0.0)
+        self._set_status_message("Hotkeys list displayed in output.", temporary=True)
 
     def apply_settings(self):
         """Applies current settings values to the UI."""
@@ -802,8 +842,12 @@ class PythonRunnerApp(Gtk.Window):
         return GLib.SOURCE_REMOVE  # Stop the timeout
 
 
+def main():
+    PythonRunnerApp()
+    Gtk.main()
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     # Set Application ID for proper desktop integration (window grouping, etc.)
-    app = PythonRunnerApp()
-    Gtk.main()
+    main()
