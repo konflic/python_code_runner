@@ -1,13 +1,8 @@
 #!/bin/bash
 
-FILENAME=python_runner.deb
+dpkg-buildpackage -us -uc -j4 
 
-parent_folder=$(pwd)
-echo $parent_folder
-cd ..
+./debian/rules clean
+echo "Derectory cleaned"
 
-dpkg-deb --build $parent_folder $parent_folder/build/$FILENAME
-echo "build/python_runner.deb created"
-
-sudo dpkg -i $parent_folder/build/$FILENAME
-echo "python_runner installed"
+echo "ALL OK"

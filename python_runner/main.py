@@ -7,6 +7,8 @@ import sys
 
 import gi
 
+from python_runner.version import VERSION
+
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "3.0")
 
@@ -40,7 +42,7 @@ class PythonRunnerApp(Gtk.Window):
     """
 
     def __init__(self):
-        Gtk.Window.__init__(self, title="Python Runner")
+        Gtk.Window.__init__(self, title=f"Python Runner {VERSION}")
         self.set_default_size(INITIAL_WIDTH, INITIAL_HEIGHT)
         self.set_size_request(INITIAL_WIDTH, INITIAL_HEIGHT)  # Minimum size
         self.set_position(Gtk.WindowPosition.CENTER)
@@ -51,7 +53,7 @@ class PythonRunnerApp(Gtk.Window):
         self._setup_settings()
         self._setup_css()  # CSS needs to be setup before UI elements that use names/classes
         self._setup_ui()
-        self._setup_hotkeys() # Setup hotkeys after UI
+        self._setup_hotkeys()  # Setup hotkeys after UI
 
         self.cache_file_path = self._get_cache_file_path()
         self._load_code_from_cache()  # Load from cache
@@ -59,7 +61,7 @@ class PythonRunnerApp(Gtk.Window):
         self.apply_settings()  # Apply initial settings from schema
         self.update_python_env_status()  # Initial status update
         self.on_show_hotkeys()
-        
+
         self.show_all()
 
     def on_destroy(self, _):
@@ -170,17 +172,47 @@ class PythonRunnerApp(Gtk.Window):
         self.add_accel_group(accel_group)
 
         # Ctrl+R for Run
-        accel_group.connect(Gdk.KEY_R, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE, self.on_run_clicked)
+        accel_group.connect(
+            Gdk.KEY_R,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_run_clicked,
+        )
         # Ctrl+C for Copy
-        accel_group.connect(Gdk.KEY_C, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE, self.on_copy_clicked)
+        accel_group.connect(
+            Gdk.KEY_C,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_copy_clicked,
+        )
         # Ctrl+S for Save/Export
-        accel_group.connect(Gdk.KEY_S, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE, self.on_export_clicked)
+        accel_group.connect(
+            Gdk.KEY_S,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_export_clicked,
+        )
         # Ctrl+T for Settings
-        accel_group.connect(Gdk.KEY_T, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE, self.on_settings_clicked)
+        accel_group.connect(
+            Gdk.KEY_T,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_settings_clicked,
+        )
         # Ctrl+, for Settings (Alternative)
-        accel_group.connect(Gdk.KEY_comma, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE, self.on_settings_clicked)
+        accel_group.connect(
+            Gdk.KEY_comma,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_settings_clicked,
+        )
         # Ctrl+H for Help (Show Hotkeys)
-        accel_group.connect(Gdk.KEY_H, Gdk.ModifierType.CONTROL_MASK, Gtk.AccelFlags.VISIBLE, self.on_show_hotkeys)
+        accel_group.connect(
+            Gdk.KEY_H,
+            Gdk.ModifierType.CONTROL_MASK,
+            Gtk.AccelFlags.VISIBLE,
+            self.on_show_hotkeys,
+        )
 
     def _setup_panes_and_views(self):
         """Creates the Paned widget and the code/output views."""
@@ -320,7 +352,9 @@ class PythonRunnerApp(Gtk.Window):
 
         return GLib.SOURCE_REMOVE  # Indicate the idle task is done
 
-    def on_run_clicked(self, accel_group=None, acceleratable=None, keyval=None, modifier=None):
+    def on_run_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
         """Handles the Run action, triggered by hotkey (Ctrl+R)."""
         code_buffer = self.code_input.get_buffer()
         start_iter = code_buffer.get_start_iter()
@@ -346,7 +380,9 @@ class PythonRunnerApp(Gtk.Window):
         thread.daemon = True  # Allow app to exit even if thread is running
         thread.start()
 
-    def on_copy_clicked(self, accel_group=None, acceleratable=None, keyval=None, modifier=None):
+    def on_copy_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
         """Handles the Copy action, triggered by hotkey (Ctrl+C)."""
         code_buffer = self.code_input.get_buffer()
         start_iter = code_buffer.get_start_iter()
@@ -360,7 +396,9 @@ class PythonRunnerApp(Gtk.Window):
         else:
             self._set_status_message("Nothing to copy", temporary=True)
 
-    def on_export_clicked(self, accel_group=None, acceleratable=None, keyval=None, modifier=None):
+    def on_export_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
         """Handles the Export action, triggered by hotkey (Ctrl+S)."""
         code_buffer = self.code_input.get_buffer()
         start_iter = code_buffer.get_start_iter()
@@ -437,7 +475,9 @@ class PythonRunnerApp(Gtk.Window):
 
         dialog.destroy()
 
-    def on_settings_clicked(self, accel_group=None, acceleratable=None, keyval=None, modifier=None):
+    def on_settings_clicked(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
         """Shows the settings dialog, triggered by hotkey (Ctrl+T or Ctrl+,)."""
         dialog = Gtk.Dialog(title="Settings", parent=self, flags=0)
         dialog.add_buttons(
@@ -610,7 +650,9 @@ class PythonRunnerApp(Gtk.Window):
         if key in [SETTING_USE_CUSTOM_VENV, SETTING_VENV_FOLDER]:
             self.update_python_env_status()
 
-    def on_show_hotkeys(self, accel_group=None, acceleratable=None, keyval=None, modifier=None):
+    def on_show_hotkeys(
+        self, accel_group=None, acceleratable=None, keyval=None, modifier=None
+    ):
         """Displays a list of available hotkeys in the output window."""
         hotkey_list = """
     --- Hotkeys ---
@@ -800,8 +842,12 @@ class PythonRunnerApp(Gtk.Window):
         return GLib.SOURCE_REMOVE  # Stop the timeout
 
 
+def main():
+    PythonRunnerApp()
+    Gtk.main()
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     # Set Application ID for proper desktop integration (window grouping, etc.)
-    app = PythonRunnerApp()
-    Gtk.main()
+    main()

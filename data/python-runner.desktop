@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=Python Runner
-Comment=A lightweight Python code runner for GNOME.
+Comment=A lightweight Python code runner.
 Exec=/usr/bin/python_runner
-Icon=python_runner
+Icon=python-runner
 Terminal=false
 Type=Application
 Categories=Utility;Development;
