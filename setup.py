@@ -11,10 +11,6 @@ setup(
     data_files=[
         ("share/applications", ["data/python-runner.desktop"]),
         ("share/icons/hicolor/scalable/apps", ["data/icons/python-runner.svg"]),
-        (
-            "share/glib-2.0/schemas",
-            ["data/glib-2.0/schemas/com.example.python-runner.gschema.xml"],
-        ),
     ],
     entry_points={
         "console_scripts": [
