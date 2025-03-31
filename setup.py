@@ -1,8 +1,9 @@
 from setuptools import setup, find_packages
+from python_runner.version import VERSION
 
 setup(
     name="python-runner",
-    version="1.0.5",
+    version=VERSION,
     packages=find_packages(),
     install_requires=[
         "PyGObject",
