@@ -5,58 +5,58 @@ import subprocess
 import threading
 import sys
 import json
-import shutil  # <<< ADDED (for shutil.which)
+import shutil
+import random
+import string
 
 import gi
 
-from python_runner.version import VERSION
+try:
+    from python_runner.version import VERSION
+except ImportError:
+    VERSION = "dev"
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkSource", "3.0")
 
 from gi.repository import Gtk, Gio, Pango, GtkSource, Gdk, GLib
 
-# --- Constants ---
 APP_ID = "com.example.python-runner"
-INITIAL_WIDTH, INITIAL_HEIGHT = 700, 500
+INITIAL_WIDTH, INITIAL_HEIGHT = 800, 600
 DEFAULT_STYLE_SCHEME = "oblivion"
-STATUS_MESSAGE_TIMEOUT_MS = 2000  # 2 seconds
+STATUS_MESSAGE_TIMEOUT_MS = 2000
 DEFAULT_TAB_SIZE = 4
 DEFAULT_TRANSLATE_TABS = True
 DEFAULT_DRAW_WHITESPACES = False
+DEFAULT_USE_CUSTOM_VENV = False
+DEFAULT_VENV_FOLDER = ""
+TAB_ID_LENGTH = 5
 
-SETTING_DRAW_WHITESPACES = "draw-whitespaces"
-SETTING_TAB_SIZE = "tab-size"
-SETTING_TRANSLATE_TABS = "translate-tabs"
-SETTING_COLOR_SCHEME_ID = "color-scheme-id"
+SETTING_DRAW_WHITESPACES = "draw_whitespaces"
+SETTING_TAB_SIZE = "tab_size"
+SETTING_TRANSLATE_TABS = "translate_tabs"
+SETTING_COLOR_SCHEME_ID = "color_scheme_id"
+SETTING_USE_CUSTOM_VENV = "use_custom_venv"
+SETTING_VENV_FOLDER = "venv_folder"
+
+CACHE_KEY_ID = "id"
+CACHE_KEY_CODE = "code"
+CACHE_KEY_SETTINGS = "settings"
 
 CACHE_FILE_NAME = "python_runner_cache.json"
-SETTINGS_FILE_NAME = "python_runner_settings.json"  # <<< ADDED
 EXECUTION_TIMEOUT = 30
 
-# --- Default Global Settings --- <<< ADDED
-DEFAULT_APP_SETTINGS = {
+DEFAULT_TAB_SETTINGS = {
     SETTING_DRAW_WHITESPACES: DEFAULT_DRAW_WHITESPACES,
     SETTING_TAB_SIZE: DEFAULT_TAB_SIZE,
     SETTING_TRANSLATE_TABS: DEFAULT_TRANSLATE_TABS,
     SETTING_COLOR_SCHEME_ID: DEFAULT_STYLE_SCHEME,
+    SETTING_USE_CUSTOM_VENV: DEFAULT_USE_CUSTOM_VENV,
+    SETTING_VENV_FOLDER: DEFAULT_VENV_FOLDER,
 }
-# --- End Default Global Settings ---
-
-# --- Default Venv Settings ---
-DEFAULT_VENV_SETTINGS = {
-    "use_custom_venv": False,
-    "venv_folder": "",
-}
-# --- End Default Venv Settings ---
 
 
 class PythonRunnerApp(Gtk.Window):
-    """
-    A simple GTK application to write and run Python code snippets with tabs,
-    saving/loading all tabs, per-tab venv settings, and JSON-based global settings.
-    """
-
     def __init__(self):
         Gtk.Window.__init__(self, title=f"Python Runner {VERSION}")
 
@@ -65,45 +65,33 @@ class PythonRunnerApp(Gtk.Window):
         self.set_position(Gtk.WindowPosition.CENTER)
         self.connect("destroy", self.on_destroy)
         self._status_timeout_id = None
+        self._temporary_status_context = None
 
-        self.app_settings = {}
-        self.cache_dir_path = (
-            self._get_app_cache_dir()
-        ) 
+        self.cache_dir_path = self._get_app_cache_dir()
         self.cache_file_path = os.path.join(self.cache_dir_path, CACHE_FILE_NAME)
-        self.settings_file_path = os.path.join(
-            self.cache_dir_path, SETTINGS_FILE_NAME
-        ) 
 
-        self._load_app_settings() 
         self._setup_css()
         self._setup_ui()
         self._setup_hotkeys()
 
         cache_loaded = self._load_code_from_cache()
-        if not cache_loaded:
-            print("Cache not loaded, creating a default tab.")
-            self._add_new_tab(add_empty=True)
 
-        self.apply_settings()
+        if not cache_loaded:
+            self._add_new_tab()
+            self.on_show_hotkeys()
+
         self.update_python_env_status()
 
         self.show_all()
 
     def on_destroy(self, _):
-        """Save cache and settings *before* quitting."""
         saved_cache = self._save_code_to_cache()
         if not saved_cache:
             print("ERROR: Failed to save code cache on exit!", file=sys.stderr)
 
-        saved_settings = self._save_app_settings()  # <<< ADDED: Save settings on exit
-        if not saved_settings:
-            print("ERROR: Failed to save settings on exit!", file=sys.stderr)
-
         Gtk.main_quit()
 
     def _get_app_cache_dir(self):
-        """Gets the path to the application's cache directory."""
         cache_dir = GLib.get_user_cache_dir()
         if not cache_dir:
             cache_dir = os.path.abspath(".")
@@ -113,18 +101,15 @@ class PythonRunnerApp(Gtk.Window):
             )
             app_cache_dir = cache_dir
         else:
-            app_cache_dir = os.path.join(
-                cache_dir, APP_ID
-            )
+            app_cache_dir = os.path.join(cache_dir, APP_ID)
 
         try:
-            os.makedirs(app_cache_dir, exist_ok=True)  # Ensure directory exists
+            os.makedirs(app_cache_dir, exist_ok=True)
         except OSError as e:
             print(
                 f"Error creating cache directory '{app_cache_dir}': {e}",
                 file=sys.stderr,
             )
-            # Fallback if creation fails (e.g., permissions)
             fallback_dir = os.path.abspath(".")
             print(
                 f"Falling back to using current directory: '{fallback_dir}'",
@@ -133,189 +118,93 @@ class PythonRunnerApp(Gtk.Window):
             return fallback_dir
         return app_cache_dir
 
-    def _load_app_settings(self):
-        """
-        Loads global application settings from the JSON settings file.
-        If the file does not exist, it creates it with default values.
-        """
-        loaded_settings = {}
-        settings_exist = os.path.exists(self.settings_file_path)
+    def _generate_unique_tab_id(self):
+        existing_ids = set()
+        for i in range(self.notebook.get_n_pages()):
+            page_widget = self.notebook.get_nth_page(i)
+            if page_widget and hasattr(page_widget, "tab_id"):
+                existing_ids.add(page_widget.tab_id)
 
-        if settings_exist:
-            print(f"Loading settings from existing file: {self.settings_file_path}")
-            try:
-                with open(self.settings_file_path, "r", encoding="utf-8") as f:
-                    loaded_settings = json.load(f)
-                if not isinstance(loaded_settings, dict):
-                    print(
-                        f"Warning: Settings file '{self.settings_file_path}' does not contain a valid dictionary. Using defaults and attempting to overwrite.",
-                        file=sys.stderr,
-                    )
-                    loaded_settings = {}  # Reset to force using defaults below
-                    # Force save defaults over invalid file structure
-                    self.app_settings = DEFAULT_APP_SETTINGS.copy()
-                    self._save_app_settings()  # Overwrite the invalid file
-                    print(
-                        f"Overwrote invalid settings file with defaults: {self.settings_file_path}"
-                    )
-                    # No need to merge below, defaults are already set
-                    print(f"Final effective settings: {self.app_settings}")
-                    return  # Exit early as we just saved defaults
-                print(f"Successfully loaded settings from {self.settings_file_path}")
-
-            except json.JSONDecodeError as e:
-                print(
-                    f"Error decoding settings file '{self.settings_file_path}': {e}. Using defaults and attempting to overwrite.",
-                    file=sys.stderr,
-                )
-                loaded_settings = {}  # Reset to force using defaults below
-                # Force save defaults over corrupted JSON
-                self.app_settings = DEFAULT_APP_SETTINGS.copy()
-                self._save_app_settings()  # Overwrite the corrupted file
-                print(
-                    f"Overwrote corrupted settings file with defaults: {self.settings_file_path}"
-                )
-                # No need to merge below, defaults are already set
-                print(f"Final effective settings: {self.app_settings}")
-                return  # Exit early as we just saved defaults
-            except Exception as e:
-                # Catch other potential errors like permission issues during read
-                print(
-                    f"Error loading settings file '{self.settings_file_path}': {e}. Using defaults for this session.",
-                    file=sys.stderr,
-                )
-                loaded_settings = {}  # Reset to ensure defaults are used
-                # Don't try to save here if reading failed due to permissions etc.
-
-        else:
-            print(
-                f"Settings file not found ({self.settings_file_path}). Creating with defaults."
-            )
-            # <<< ADDED: Create file with defaults if it doesn't exist >>>
-            self.app_settings = DEFAULT_APP_SETTINGS.copy()
-            if self._save_app_settings():  # Try to save the defaults immediately
-                print(
-                    f"Successfully created default settings file: {self.settings_file_path}"
-                )
-            else:
-                print(
-                    f"Warning: Failed to create default settings file. Using defaults for this session.",
-                    file=sys.stderr,
-                )
-            # No need to merge below, defaults are already set
-            print(f"Final effective settings: {self.app_settings}")
-            return  # Exit early as we just created defaults
-
-        # --- Merge loaded settings with defaults (only reached if file existed and was loaded successfully) ---
-        # Start with defaults
-        self.app_settings = DEFAULT_APP_SETTINGS.copy()
-        # Update with loaded values, ensuring correct types
-        if isinstance(loaded_settings, dict):
-            updated_keys = 0
-            for key, default_value in DEFAULT_APP_SETTINGS.items():
-                if key in loaded_settings:
-                    loaded_value = loaded_settings[key]
-                    if isinstance(loaded_value, type(default_value)):
-                        self.app_settings[key] = loaded_value
-                        updated_keys += 1
-                    else:
-                        print(
-                            f"Warning: Setting '{key}' in file has incorrect type ({type(loaded_value).__name__}), expected {type(default_value).__name__}. Using default value.",
-                            file=sys.stderr,
-                        )
-                # else: Key not in loaded_settings, default value is already set
-
-            # Check for unknown keys in the loaded file (optional cleanup/warning)
-            unknown_keys = set(loaded_settings.keys()) - set(
-                DEFAULT_APP_SETTINGS.keys()
-            )
-            if unknown_keys:
-                print(
-                    f"Warning: Ignoring unknown keys found in settings file: {', '.join(unknown_keys)}",
-                    file=sys.stderr,
-                )
-
-            print(f"Merged {updated_keys} values from loaded settings with defaults.")
-        # This else shouldn't be reached due to earlier checks, but defensive coding
-        else:
-            print(
-                "Internal Warning: loaded_settings was not a dict during merge phase. Using pure defaults.",
-                file=sys.stderr,
-            )
-            self.app_settings = DEFAULT_APP_SETTINGS.copy()
-
-        print(f"Final effective settings: {self.app_settings}")
-
-    # <<< ADDED: Save global settings to JSON file >>>
-    def _save_app_settings(self):
-        """Saves the current global application settings to the JSON settings file."""
-        try:
-            # Ensure cache directory exists (might fail in rare cases after init)
-            os.makedirs(self.cache_dir_path, exist_ok=True)
-            with open(self.settings_file_path, "w", encoding="utf-8") as f:
-                json.dump(self.app_settings, f, indent=4)
-            print(f"Settings saved to {self.settings_file_path}")
-            return True
-        except Exception as e:
-            print(
-                f"Error saving settings to '{self.settings_file_path}': {e}",
-                file=sys.stderr,
-            )
-            return False
+        chars = string.ascii_letters + string.digits
+        while True:
+            new_id = "".join(random.choices(chars, k=TAB_ID_LENGTH))
+            if new_id not in existing_ids:
+                return new_id
 
     def _save_code_to_cache(self):
-        """Saves the code and venv settings from *all* tabs to the JSON cache file."""
         tabs_data = []
         n_pages = self.notebook.get_n_pages()
-        if n_pages == 0:
-            print("No tabs to save.")
-            # Save an empty list for consistency? Or remove the file? Let's save empty list.
-            # pass
 
         for i in range(n_pages):
             page_widget = self.notebook.get_nth_page(i)
-            if page_widget and hasattr(page_widget, "tab_widgets"):
+
+            if (
+                page_widget
+                and hasattr(page_widget, "tab_widgets")
+                and hasattr(page_widget, "tab_settings")
+                and hasattr(page_widget, "tab_id")
+            ):
                 tab_widgets = page_widget.tab_widgets
+                tab_settings = page_widget.tab_settings
+                tab_id = page_widget.tab_id
+
+                if tab_settings.get(SETTING_USE_CUSTOM_VENV) and not tab_settings.get(
+                    SETTING_VENV_FOLDER
+                ):
+                    tab_settings[SETTING_USE_CUSTOM_VENV] = False
+
                 code_buffer = tab_widgets["code_buffer"]
                 start_iter = code_buffer.get_start_iter()
                 end_iter = code_buffer.get_end_iter()
                 code = code_buffer.get_text(start_iter, end_iter, False)
 
-                venv_settings = getattr(
-                    page_widget, "venv_settings", DEFAULT_VENV_SETTINGS.copy()
+                tabs_data.append(
+                    {
+                        CACHE_KEY_ID: tab_id,
+                        CACHE_KEY_CODE: code,
+                        CACHE_KEY_SETTINGS: tab_settings,
+                    }
                 )
-
-                tabs_data.append({"code": code, "venv_settings": venv_settings})
             else:
+                tab_label_text = "Unknown (Widget Error)"
+                try:
+                    tab_label_widget = self.notebook.get_tab_label(page_widget)
+                    if isinstance(tab_label_widget, Gtk.Label):
+                        tab_label_text = tab_label_widget.get_text()
+                    elif isinstance(tab_label_widget, Gtk.EventBox) and isinstance(
+                        tab_label_widget.get_child(), Gtk.Label
+                    ):
+                        tab_label_text = tab_label_widget.get_child().get_text()
+                except Exception:
+                    pass
+
                 print(
-                    f"Warning: Could not get widgets for tab index {i} during save.",
+                    f"Warning: Could not get widgets, settings, or ID for tab index {i} (label: '{tab_label_text}') during save.",
                     file=sys.stderr,
                 )
 
         try:
-            # Ensure cache directory exists
-            os.makedirs(
-                self.cache_dir_path, exist_ok=True
-            )
-            with open(self.cache_file_path, "w", encoding="utf-8") as f:
+            os.makedirs(self.cache_dir_path, exist_ok=True)
+            temp_file_path = self.cache_file_path + ".tmp"
+            with open(temp_file_path, "w", encoding="utf-8") as f:
                 json.dump(tabs_data, f, indent=4)
-            print(
-                f"Code for {len(tabs_data)} tabs saved to cache {self.cache_file_path}"
-            )
+            os.replace(temp_file_path, self.cache_file_path)
+
             return True
         except Exception as e:
             print(
                 f"Error saving code cache to '{self.cache_file_path}': {e}",
                 file=sys.stderr,
             )
+            if os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError as rm_e:
+                    print(f"Error removing temp cache file: {rm_e}", file=sys.stderr)
             return False
 
     def _load_code_from_cache(self):
-        """Loads code and venv settings from the JSON cache file, creating tabs."""
         if not os.path.exists(self.cache_file_path):
-            print(
-                f"Code cache file not found: {self.cache_file_path}"
-            )
             return False
 
         try:
@@ -324,66 +213,112 @@ class PythonRunnerApp(Gtk.Window):
 
             if not isinstance(tabs_data, list):
                 print(
-                    f"Error: Code cache file format is invalid (expected a list) in '{self.cache_file_path}'.",  # <<< CHANGED
+                    f"Error: Cache file format invalid (expected list): '{self.cache_file_path}'.",
                     file=sys.stderr,
                 )
                 return False
 
             if not tabs_data:
-                print(
-                    f"Code cache file '{self.cache_file_path}' is empty."
-                )  # <<< CHANGED
-                return False  # Treat empty cache same as non-existent cache for initial tab creation
+                return False
 
-            # Clear existing tabs before loading
             while self.notebook.get_n_pages() > 0:
                 self.notebook.remove_page(0)
 
+            num_loaded = 0
+            loaded_ids = set()
             for i, tab_data in enumerate(tabs_data):
-                code = tab_data.get("code", "")
-                venv_settings = tab_data.get(
-                    "venv_settings", DEFAULT_VENV_SETTINGS.copy()
-                )
-
-                if (
-                    not isinstance(venv_settings, dict)
-                    or "use_custom_venv" not in venv_settings
-                    or "venv_folder" not in venv_settings
-                ):
+                if not isinstance(tab_data, dict):
                     print(
-                        f"Warning: Invalid venv_settings format for tab {i+1} in cache. Using defaults.",
+                        f"Warning: Skipping invalid item at index {i} in cache.",
                         file=sys.stderr,
                     )
-                    venv_settings = DEFAULT_VENV_SETTINGS.copy()
+                    continue
 
-                self._add_tab_with_content(code, venv_settings)
+                code = tab_data.get(CACHE_KEY_CODE, "")
+                loaded_id = tab_data.get(CACHE_KEY_ID)
+                loaded_settings = tab_data.get(CACHE_KEY_SETTINGS, {})
 
-            print(
-                f"Loaded {len(tabs_data)} tabs from cache {self.cache_file_path}."
-            )
-            self._set_status_message("Code loaded from cache.", temporary=True)
+                final_tab_id = None
+                if (
+                    loaded_id
+                    and isinstance(loaded_id, str)
+                    and len(loaded_id) <= TAB_ID_LENGTH
+                ):
+                    if loaded_id not in loaded_ids:
+                        final_tab_id = loaded_id
+                        loaded_ids.add(loaded_id)
+                    else:
+                        print(
+                            f"Warning: Duplicate ID '{loaded_id}' found in cache. Generating new ID.",
+                            file=sys.stderr,
+                        )
+                elif loaded_id:
+                    print(
+                        f"Warning: Invalid ID '{loaded_id}' found in cache. Generating new ID.",
+                        file=sys.stderr,
+                    )
+
+                final_settings = DEFAULT_TAB_SETTINGS.copy()
+                if isinstance(loaded_settings, dict):
+                    unknown_keys = []
+                    for key, default_value in DEFAULT_TAB_SETTINGS.items():
+                        if key in loaded_settings:
+                            loaded_value = loaded_settings[key]
+                            if isinstance(loaded_value, type(default_value)):
+                                final_settings[key] = loaded_value
+                            else:
+                                pass
+                    for loaded_key in loaded_settings:
+                        if loaded_key not in DEFAULT_TAB_SETTINGS:
+                            unknown_keys.append(loaded_key)
+                    if unknown_keys:
+                        print(
+                            f"Warning: Ignoring unknown settings keys for loaded tab (ID: {final_tab_id or 'New'}): {', '.join(unknown_keys)}",
+                            file=sys.stderr,
+                        )
+
+                    if (
+                        final_settings.get(SETTING_USE_CUSTOM_VENV)
+                        and not final_settings.get(SETTING_VENV_FOLDER, "").strip()
+                    ):
+                        final_settings[SETTING_USE_CUSTOM_VENV] = False
+                else:
+                    print(
+                        f"Warning: Invalid 'settings' format for loaded tab (ID: {final_tab_id or 'New'}) in cache. Using defaults.",
+                        file=sys.stderr,
+                    )
+
+                self._add_tab_with_content(
+                    code, final_settings, existing_id=final_tab_id, save_cache=False
+                )
+                num_loaded += 1
+
             if self.notebook.get_n_pages() > 0:
                 self.notebook.set_current_page(0)
+
+            self.on_show_hotkeys()
             return True
 
         except json.JSONDecodeError as e:
             print(
-                f"Error decoding cache file ({self.cache_file_path}): {e}",
+                f"Error decoding cache file ({self.cache_file_path}): {e}. Load aborted.",
                 file=sys.stderr,
             )
+            while self.notebook.get_n_pages() > 0:
+                self.notebook.remove_page(0)
             return False
         except Exception as e:
             print(
-                f"Error loading from cache ({self.cache_file_path}): {e}",
+                f"Error loading from cache ({self.cache_file_path}): {e}. Load aborted.",
                 file=sys.stderr,
             )
-            self._set_status_message("Error loading code from cache.", temporary=True)
+            while self.notebook.get_n_pages() > 0:
+                self.notebook.remove_page(0)
+            self._set_status_message("Error loading code from cache.")
             return False
 
     def _setup_css(self):
-        """Loads and applies CSS styles."""
         css_provider = Gtk.CssProvider()
-        # CSS for selection remains useful
         css = f"""
         textview text selection:focus, textview text selection {{
             background-color: alpha(#333333, 0.5);
@@ -400,69 +335,59 @@ class PythonRunnerApp(Gtk.Window):
             print(f"Error loading CSS: {e}", file=sys.stderr)
 
     def _setup_ui(self):
-        """Builds the main UI structure with tabs."""
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.add(vbox)
-
-        self.notebook = Gtk.Notebook()
-        self.notebook.set_scrollable(True)
+        self.notebook = Gtk.Notebook(scrollable=True)
         vbox.pack_start(self.notebook, True, True, 0)
         self.notebook.connect("switch-page", self.on_tab_switched)
         self.notebook.connect("page-removed", self.on_page_removed)
-
         status_box = self._setup_statusbar()
         vbox.pack_start(status_box, False, False, 0)
 
-    def _add_new_tab(self, add_empty=False, inherit_settings=True):
-        """Adds a new tab to the notebook.
-        If add_empty is True, it adds a blank tab.
-        If inherit_settings is True, it copies venv settings from the current tab.
-        """
-        initial_venv_settings = DEFAULT_VENV_SETTINGS.copy()
-        if inherit_settings:
-            current_tab_widgets = self._get_current_tab_widgets()
-            if current_tab_widgets:
-                current_page_index = self.notebook.get_current_page()
-                if current_page_index != -1:  # Check if a tab is actually selected
-                    current_paned = self.notebook.get_nth_page(current_page_index)
-                    if current_paned and hasattr(current_paned, "venv_settings"):
-                        initial_venv_settings = current_paned.venv_settings.copy()
+    def _add_new_tab(self):
+        initial_tab_settings = DEFAULT_TAB_SETTINGS.copy()
+        self._add_tab_with_content(
+            "import this", initial_tab_settings, existing_id=None, save_cache=True
+        )
 
-        code = "" if add_empty else "# New Tab" 
-        self._add_tab_with_content(code, initial_venv_settings)
+    def _add_tab_with_content(
+        self, code, tab_settings, existing_id=None, save_cache=True
+    ):
+        tab_content_paned = self._create_tab_content(tab_settings)
 
-    def _add_tab_with_content(self, code, venv_settings):
-        """Adds a new tab with the given code and venv_settings."""
-        tab_content_paned = self._create_tab_content(venv_settings)
+        if (
+            existing_id
+            and isinstance(existing_id, str)
+            and len(existing_id) <= TAB_ID_LENGTH
+        ):
+            tab_id = existing_id
+        else:
+            tab_id = self._generate_unique_tab_id()
+        tab_content_paned.tab_id = tab_id
 
         code_buffer = tab_content_paned.tab_widgets["code_buffer"]
         code_buffer.set_text(code or "", -1)
 
-        n_pages = self.notebook.get_n_pages()
-        tab_label_widget = Gtk.Label(label=f"Tab {n_pages + 1}")
+        tab_label_widget = Gtk.Label(label=tab_id)
 
         self.notebook.append_page(tab_content_paned, tab_label_widget)
-        self.notebook.show_all()  # Ensure the new tab content is visible
+        self.notebook.show_all()
         new_page_index = self.notebook.get_n_pages() - 1
         self.notebook.set_current_page(new_page_index)
 
-        # Apply the currently loaded global settings to the new tab
-        self.apply_global_settings_to_tab(new_page_index)
-        self.update_python_env_status()  # Update status bar for the new tab
+        self.update_python_env_status()
 
-    def _create_tab_content(self, initial_venv_settings):
-        """Creates the content (Paned with code and output views) for a single tab."""
+        if save_cache:
+            self._save_code_to_cache()
+
+    def _create_tab_content(self, initial_tab_settings):
         paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        paned.tab_settings = initial_tab_settings.copy()
+        paned.tab_widgets = {}
 
-        # Store venv settings directly on the Paned widget
-        paned.venv_settings = initial_venv_settings.copy()
-        paned.tab_widgets = {}  # Dictionary to hold widgets for easy access
-
-        # --- Code Input View ---
         code_buffer = GtkSource.Buffer()
-        code_input = GtkSource.View.new_with_buffer(code_buffer)  # Use constructor
+        code_input = GtkSource.View.new_with_buffer(code_buffer)
 
-        # Apply Syntax Highlighting (Python)
         lang_manager = GtkSource.LanguageManager.get_default()
         python_lang = lang_manager.get_language("python3") or lang_manager.get_language(
             "python"
@@ -472,216 +397,200 @@ class PythonRunnerApp(Gtk.Window):
         else:
             print("Warning: Python syntax highlighting not available.", file=sys.stderr)
 
-        # Apply initial Color Scheme (will be overridden by apply_settings)
         style_manager = GtkSource.StyleSchemeManager.get_default()
-        initial_scheme_id = self.app_settings.get(
+        scheme_id = initial_tab_settings.get(
             SETTING_COLOR_SCHEME_ID, DEFAULT_STYLE_SCHEME
         )
-        scheme = style_manager.get_scheme(initial_scheme_id)
+        scheme = (
+            style_manager.get_scheme(scheme_id)
+            or style_manager.get_scheme(DEFAULT_STYLE_SCHEME)
+            or style_manager.get_scheme("classic")
+        )
         if scheme:
             code_buffer.set_style_scheme(scheme)
         else:
-            print(
-                f"Warning: Initial scheme '{initial_scheme_id}' not found.",
-                file=sys.stderr,
-            )
+            print(f"Error: Could not find any valid color scheme.", file=sys.stderr)
 
-        # Editor Features
         code_input.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         code_input.set_monospace(True)
         code_input.set_show_line_numbers(True)
         code_input.set_highlight_current_line(True)
         code_input.set_auto_indent(True)
         code_input.set_indent_on_tab(True)
-
         code_input.set_tab_width(
-            self.app_settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE)
+            initial_tab_settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE)
         )
         code_input.set_insert_spaces_instead_of_tabs(
-            self.app_settings.get(SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS)
+            initial_tab_settings.get(SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS)
         )
 
-        # Margins
         margin = 10
         code_input.set_left_margin(margin)
         code_input.set_right_margin(margin)
         code_input.set_top_margin(margin)
         code_input.set_bottom_margin(margin)
 
-        # Whitespace Drawing (applied by apply_settings)
         space_drawer = code_input.get_space_drawer()
-        space_drawer.set_enable_matrix(True)  # Needed for detailed control
+        space_drawer.set_enable_matrix(True)
+        draw_ws = initial_tab_settings.get(
+            SETTING_DRAW_WHITESPACES, DEFAULT_DRAW_WHITESPACES
+        )
+        types = (
+            GtkSource.SpaceTypeFlags.SPACE | GtkSource.SpaceTypeFlags.TAB
+            if draw_ws
+            else GtkSource.SpaceTypeFlags.NONE
+        )
+        space_drawer.set_types_for_locations(GtkSource.SpaceLocationFlags.ALL, types)
 
-        # Scrolled Window for Code Input
-        scrolled_code = Gtk.ScrolledWindow()
+        scrolled_code = Gtk.ScrolledWindow(
+            hexpand=True, vexpand=True, shadow_type=Gtk.ShadowType.IN
+        )
         scrolled_code.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled_code.set_hexpand(True)
-        scrolled_code.set_vexpand(True)
         scrolled_code.add(code_input)
-        paned.add1(scrolled_code)  # Add to top pane
+        paned.add1(scrolled_code)
 
-        # --- Output View ---
         output_buffer = Gtk.TextBuffer()
-        output_view = Gtk.TextView(buffer=output_buffer)
-        output_view.set_editable(False)
-        output_view.set_monospace(True)
-        output_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        # Margins
+        output_view = Gtk.TextView(
+            buffer=output_buffer,
+            editable=False,
+            monospace=True,
+            wrap_mode=Gtk.WrapMode.WORD_CHAR,
+        )
         output_view.set_left_margin(margin)
         output_view.set_right_margin(margin)
         output_view.set_top_margin(margin)
         output_view.set_bottom_margin(margin)
 
-        # Scrolled Window for Output
-        scrolled_output = Gtk.ScrolledWindow()
+        scrolled_output = Gtk.ScrolledWindow(
+            hexpand=True, vexpand=True, shadow_type=Gtk.ShadowType.IN
+        )
         scrolled_output.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled_output.set_hexpand(True)
-        scrolled_output.set_vexpand(True)
         scrolled_output.add(output_view)
         paned.add2(scrolled_output)
 
-        # Initial position of the divider
-        paned.set_position(INITIAL_HEIGHT // 2)
-
+        paned.set_position(INITIAL_HEIGHT // 2 - 30)
         paned.tab_widgets = {
             "code_input": code_input,
             "code_buffer": code_buffer,
             "output_buffer": output_buffer,
             "output_view": output_view,
             "space_drawer": space_drawer,
-            "paned": paned, 
+            "paned": paned,
         }
-
         return paned
 
     def _setup_statusbar(self):
-        """Creates the status bar area."""
         status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         status_box.set_border_width(0)
         status_box.set_margin_start(6)
         status_box.set_margin_end(6)
         status_box.set_margin_top(0)
         status_box.set_margin_bottom(5)
-
-        self.status_label = Gtk.Label(label="Ready", xalign=0.0)
-        self.status_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status_label = Gtk.Label(
+            label="Ready", xalign=0.0, ellipsize=Pango.EllipsizeMode.END
+        )
         status_box.pack_start(self.status_label, True, True, 0)
-
         return status_box
 
     def _setup_hotkeys(self):
-        """Sets up global hotkeys for application actions."""
         accel_group = Gtk.AccelGroup()
         self.add_accel_group(accel_group)
+        keymap = {
+            "<Control>R": self.on_run_clicked,
+            "<Control>C": self.on_copy_clicked,
+            "<Control>S": self.on_export_clicked,
+            "<Control>T": self.on_settings_clicked,
+            "<Control>comma": self.on_settings_clicked,
+            "<Control>H": self.on_show_hotkeys,
+            "<Control>N": self.on_new_tab_clicked,
+            "<Control>W": self.on_remove_tab_clicked,
+            "<Control>P": self.on_pip_freeze_clicked,
+        }
+        for accel, callback in keymap.items():
+            key, mod = Gtk.accelerator_parse(accel)
+            if key != 0:
+                accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, callback)
+            else:
+                print(
+                    f"Warning: Failed to parse accelerator '{accel}'", file=sys.stderr
+                )
 
-        # Define hotkeys and connect them to methods
-        key, mod = Gtk.accelerator_parse("<Control>R")
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_run_clicked)
-
-        key, mod = Gtk.accelerator_parse("<Control>C")
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_copy_clicked)
-
-        key, mod = Gtk.accelerator_parse("<Control>S")
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_export_clicked)
-
-        # Settings
-        key, mod = Gtk.accelerator_parse("<Control>T")
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_settings_clicked)
-        key, mod = Gtk.accelerator_parse("<Control>comma")  # Alternative
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_settings_clicked)
-
-        key, mod = Gtk.accelerator_parse("<Control>H")
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_show_hotkeys)
-
-        # Tab Management
-        key, mod = Gtk.accelerator_parse("<Control>N")
-        accel_group.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_new_tab_clicked)
-        key, mod = Gtk.accelerator_parse("<Control>W")
-        accel_group.connect(
-            key, mod, Gtk.AccelFlags.VISIBLE, self.on_remove_tab_clicked
-        )
-
-        key, mod = Gtk.accelerator_parse(
-            "<Control>P"
-        )
-        accel_group.connect(
-            key, mod, Gtk.AccelFlags.VISIBLE, self.on_pip_freeze_clicked
-        )
-
-    def _get_current_tab_widgets(self):
-        """Gets the widgets associated with the current tab's Paned."""
-        current_page_index = self.notebook.get_current_page()
-        if current_page_index == -1:  # No tab selected/exists
-            return None
-        paned = self.notebook.get_nth_page(current_page_index)
+    def _get_current_tab_widgets_settings_id(self):
+        idx = self.notebook.get_current_page()
+        if idx == -1:
+            return None, None, None
+        paned = self.notebook.get_nth_page(idx)
         if (
             paned
             and hasattr(paned, "tab_widgets")
             and isinstance(paned.tab_widgets, dict)
+            and hasattr(paned, "tab_settings")
+            and isinstance(paned.tab_settings, dict)
+            and hasattr(paned, "tab_id")
+            and isinstance(paned.tab_id, str)
         ):
-            return paned.tab_widgets
+            return paned.tab_widgets, paned.tab_settings, paned.tab_id
         else:
-            print(
-                f"Warning: Could not find expected widgets structure for current tab index {current_page_index}",
-                file=sys.stderr,
-            )
-            return None
+            return None, None, None
+
+    def _get_current_tab_widgets(self):
+        widgets, _, _ = self._get_current_tab_widgets_settings_id()
+        return widgets
+
+    def _get_current_tab_id(self):
+        _, _, tab_id = self._get_current_tab_widgets_settings_id()
+        return tab_id
 
     def _run_code_thread(
         self, code, python_interpreter, output_buffer, output_view, source_view
     ):
-        """Worker thread function to execute Python code."""
-        output = ""
-        error = ""
-        success = False
+        output, error, success = "", "", False
         process = None
-
         try:
             process = subprocess.Popen(
-                [python_interpreter, "-u", "-c", code],  # -u for unbuffered output
+                [python_interpreter, "-u", "-c", code],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,  # Decode stdout/stderr as text
-                encoding="utf-8",  # Specify encoding
-                errors="replace",  # Handle potential decoding errors
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-
             stdout_data, stderr_data = process.communicate(timeout=EXECUTION_TIMEOUT)
-
             if process.returncode == 0:
                 output = stdout_data
-                if stderr_data:  
-                    error = f"--- Warnings/Stderr Output ---\n{stderr_data}"
                 success = True
+                if stderr_data:
+                    error = f"--- Warnings/Stderr Output ---\n{stderr_data}"
             else:
-                output = stdout_data 
-                error = f"--- Error (Exit Code {process.returncode}) ---\n{stderr_data}"
-
-        except FileNotFoundError:
-            error = f"Error: Python interpreter '{python_interpreter}' not found."
-            success = False
-        except subprocess.TimeoutExpired:
-            if process:
-                process.kill()  # Ensure the process is terminated
-                stdout_data, stderr_data = process.communicate()
                 output = stdout_data
-                error = f"--- Error: Code execution timed out after {EXECUTION_TIMEOUT} seconds ---\n{stderr_data}"
-            else:
-                error = f"Error: Code execution timed out after {EXECUTION_TIMEOUT} seconds."
+                error = f"--- Error (Exit Code {process.returncode}) ---\n{stderr_data}"
+        except FileNotFoundError:
+            error = f"Error: Interpreter '{python_interpreter}' not found."
+        except subprocess.TimeoutExpired:
             success = False
+            if process:
+                process.kill()
+                try:
+                    stdout_data, stderr_data = process.communicate(timeout=1)
+                except Exception:
+                    stdout_data, stderr_data = (
+                        "",
+                        "(Timeout/Error fetching output after kill)",
+                    )
+                output = stdout_data
+                error = f"--- Error: Code timed out ({EXECUTION_TIMEOUT}s) ---\n{stderr_data}"
+            else:
+                error = f"Error: Code timed out ({EXECUTION_TIMEOUT}s)."
         except Exception as e:
             error = f"Error executing code: {e}"
             success = False
-
+        finally:
             if process and process.poll() is None:
                 try:
                     process.kill()
-                    process.communicate()
-                except Exception as kill_e:
-                    print(
-                        f"Error trying to kill process after exception: {kill_e}",
-                        file=sys.stderr,
-                    )
+                    process.communicate(timeout=1)
+                except Exception:
+                    pass
 
         GLib.idle_add(
             self._update_output_view,
@@ -696,134 +605,108 @@ class PythonRunnerApp(Gtk.Window):
     def _update_output_view(
         self, output_text, error_text, success, output_buffer, output_view, source_view
     ):
-        """Updates the output view and restores status (runs in main thread)."""
-        full_output = output_text or ""
-        if error_text:
-            if full_output:
-                full_output += "\n" + error_text
-            else:
-                full_output = error_text
-
+        full_output = (output_text or "") + (
+            ("\n" + error_text)
+            if error_text and (output_text or "")
+            else (error_text or "")
+        )
         output_buffer.set_text(full_output)
-        # Scroll to the end of the output
         end_iter = output_buffer.get_end_iter()
-        output_view.scroll_to_iter(end_iter, 0.0, False, 0.0, 0.0)
+        output_buffer.place_cursor(end_iter)
+        output_view.scroll_to_mark(output_buffer.get_insert(), 0.0, False, 0.0, 1.0)
 
         current_widgets = self._get_current_tab_widgets()
         active_source_view = current_widgets["code_input"] if current_widgets else None
-        if source_view == active_source_view:
+        if (
+            source_view == active_source_view
+            and source_view == self._temporary_status_context
+        ):
             self._restore_default_status()
 
         return GLib.SOURCE_REMOVE
 
     def on_run_clicked(self, *args):
-        """Handles the Run action, triggered by hotkey (Ctrl+R) or button, on the current tab."""
-        tab_widgets = self._get_current_tab_widgets()
+        tab_widgets, _, tab_id = self._get_current_tab_widgets_settings_id()
         if not tab_widgets:
-            self._set_status_message("No active tab found.", temporary=True)
+            self._set_status_message("No active tab found.")
             return
 
         code_buffer = tab_widgets["code_buffer"]
         output_buffer = tab_widgets["output_buffer"]
         output_view = tab_widgets["output_view"]
-        code_input = tab_widgets["code_input"]  # Used for status message association
-
-        start_iter = code_buffer.get_start_iter()
-        end_iter = code_buffer.get_end_iter()
+        code_input = tab_widgets["code_input"]
+        start_iter, end_iter = code_buffer.get_start_iter(), code_buffer.get_end_iter()
         code = code_buffer.get_text(start_iter, end_iter, False)
 
         if not code.strip():
             self._set_status_message(
-                "Nothing to run.", temporary=True, temporary_source_view=code_input
+                f"Nothing to run.", temporary_source_view=code_input
             )
             return
 
         python_interpreter = self.get_python_interpreter()
-        # Check if the interpreter path indicates an error/warning state
-        if (
-            "Warning:" in python_interpreter
-            or "Not Found" in python_interpreter
-            or "No active tab" in python_interpreter
+        if python_interpreter.startswith("Warning:") or not os.path.exists(
+            python_interpreter
         ):
-            error_msg = f"Error: Invalid Python interpreter selected ({python_interpreter}). Check settings (Ctrl+T)."
-            self._set_status_message(
-                error_msg, temporary=True
-            )
-            output_buffer.set_text(error_msg)  # Also show in output
+            error_msg = f"Error: Invalid/missing Python ('{python_interpreter}'). Check settings (Ctrl+T)."
+            self._set_status_message(error_msg)
+            output_buffer.set_text(error_msg)
             return
 
-        output_buffer.set_text("")  # Clear previous output
+        save_ok = self._save_code_to_cache()
+        if not save_ok:
+            self._set_status_message(
+                "Failed to save cache before running!", temporary=False
+            )
 
+        output_buffer.set_text("")
+        self._set_status_message(
+            f"Running with {os.path.basename(python_interpreter)}...",
+            temporary_source_view=code_input,
+        )
         thread = threading.Thread(
             target=self._run_code_thread,
-            args=(
-                code,
-                python_interpreter,
-                output_buffer,
-                output_view,
-                code_input,  # Pass the source_view for context
-            ),
-            daemon=True,  # Allow app to exit even if thread is running (due to timeout kill)
+            args=(code, python_interpreter, output_buffer, output_view, code_input),
+            daemon=True,
         )
         thread.start()
 
     def on_copy_clicked(self, *args):
-        """Handles the Copy action, triggered by hotkey (Ctrl+C), on the current tab.
-        Copies selection if available, otherwise copies the entire code buffer.
-        """
-        tab_widgets = self._get_current_tab_widgets()
+        tab_widgets, _, tab_id = self._get_current_tab_widgets_settings_id()
         if not tab_widgets:
-            return  # No active tab
-
-        code_buffer = tab_widgets["code_buffer"]
-        code_input = tab_widgets["code_input"]  # For status message association
-
-        # Check if there is a text selection in the code buffer
+            return
+        code_buffer, code_input = tab_widgets["code_buffer"], tab_widgets["code_input"]
         if code_buffer.get_has_selection():
             start, end = code_buffer.get_selection_bounds()
-            text_to_copy = code_buffer.get_text(start, end, True)  # Get selected text
+            text = code_buffer.get_text(start, end, True)
         else:
-            # No selection, get the entire buffer content
-            start_iter = code_buffer.get_start_iter()
-            end_iter = code_buffer.get_end_iter()
-            text_to_copy = code_buffer.get_text(start_iter, end_iter, False)
-
-        if text_to_copy:
-            clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-            clipboard.set_text(text_to_copy, -1)  # -1 means length is auto-calculated
-            self._set_status_message(
-                "Code copied to clipboard",
-                temporary=True,
-                temporary_source_view=code_input,
-            )
+            start, end = code_buffer.get_start_iter(), code_buffer.get_end_iter()
+            text = code_buffer.get_text(start, end, False)
+        if text:
+            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
+            self._set_status_message(f"Code copied", temporary_source_view=code_input)
         else:
             self._set_status_message(
-                "Nothing to copy", temporary=True, temporary_source_view=code_input
+                f"Nothing to copy", temporary_source_view=code_input
             )
 
     def on_export_clicked(self, *args):
-        """Handles the Export action (Save As), triggered by hotkey (Ctrl+S), on the current tab."""
-        tab_widgets = self._get_current_tab_widgets()
-        if not tab_widgets:
-            return  # No active tab
-
-        code_buffer = tab_widgets["code_buffer"]
-        code_input = tab_widgets["code_input"]  # For status message
-
-        start_iter = code_buffer.get_start_iter()
-        end_iter = code_buffer.get_end_iter()
-        code = code_buffer.get_text(start_iter, end_iter, False)
-
+        tab_widgets, _, tab_id = self._get_current_tab_widgets_settings_id()
+        if not tab_widgets or not tab_id:
+            self._set_status_message("No active tab to export.")
+            return
+        code_buffer, code_input = tab_widgets["code_buffer"], tab_widgets["code_input"]
+        start, end = code_buffer.get_start_iter(), code_buffer.get_end_iter()
+        code = code_buffer.get_text(start, end, False)
         if not code.strip():
             self._set_status_message(
-                "No code to export", temporary=True, temporary_source_view=code_input
+                f"No code to export", temporary_source_view=code_input
             )
             return
 
-        # Create FileChooserDialog for saving
         dialog = Gtk.FileChooserDialog(
-            title="Export Code As...",
-            parent=self,  # Set parent window
+            title=f"Export Code From Tab {tab_id} As...",
+            parent=self,
             action=Gtk.FileChooserAction.SAVE,
         )
         dialog.add_buttons(
@@ -832,119 +715,96 @@ class PythonRunnerApp(Gtk.Window):
             Gtk.STOCK_SAVE,
             Gtk.ResponseType.OK,
         )
-        dialog.set_do_overwrite_confirmation(True)  # Ask before overwriting
-        dialog.set_current_name("script.py")  # Suggest a filename
+        dialog.set_do_overwrite_confirmation(True)
 
-        # Add file filters
+        suggested = f"{tab_id}.py"
+        dialog.set_current_name(suggested)
+
         py_filter = Gtk.FileFilter()
         py_filter.set_name("Python files (*.py)")
         py_filter.add_pattern("*.py")
-        dialog.add_filter(py_filter)
-
         all_filter = Gtk.FileFilter()
         all_filter.set_name("All files (*.*)")
         all_filter.add_pattern("*")
-        dialog.add_filter(all_filter)  # Add second so Python filter is default
+        dialog.add_filter(py_filter)
+        dialog.add_filter(all_filter)
 
         response = dialog.run()
-        filename = None  # Initialize filename
-
+        filename = None
         if response == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
-            # Automatically add .py extension if Python filter is selected and missing
-            selected_filter = dialog.get_filter()
             if (
-                selected_filter == py_filter
-                and filename
-                and not filename.lower().endswith(".py")
+                filename
+                and not os.path.splitext(filename)[1]
+                and dialog.get_filter() == py_filter
             ):
                 filename += ".py"
+            elif (
+                filename
+                and dialog.get_filter() == py_filter
+                and not filename.lower().endswith(".py")
+            ):
+                if not filename.lower().endswith(".py"):
+                    filename += ".py"
 
-            if filename:  # Ensure a filename was actually obtained
+            if filename:
                 try:
                     with open(filename, "w", encoding="utf-8") as f:
                         f.write(code)
                     self._set_status_message(
-                        f"Code exported to {os.path.basename(filename)}",
-                        temporary=True,
+                        f"Exported to {os.path.basename(filename)}",
                         temporary_source_view=code_input,
                     )
                 except Exception as e:
                     print(f"Error saving file '{filename}': {e}", file=sys.stderr)
-                    # Show an error dialog to the user
-                    error_dialog = Gtk.MessageDialog(
+                    ed = Gtk.MessageDialog(
                         transient_for=self,
                         flags=0,
                         message_type=Gtk.MessageType.ERROR,
                         buttons=Gtk.ButtonsType.OK,
                         text="Error Exporting File",
                     )
-                    error_dialog.format_secondary_text(f"Could not save file:\n{e}")
-                    error_dialog.run()
-                    error_dialog.destroy()
+                    ed.format_secondary_text(f"Could not save file:\n{e}")
+                    ed.run()
+                    ed.destroy()
                     self._set_status_message(
-                        f"Error exporting file",
-                        temporary=True,
-                        temporary_source_view=code_input,
+                        f"Error exporting file", temporary_source_view=code_input
                     )
             else:
-                # This case should be rare if response is OK, but handle defensively
-                print(
-                    "Error: FileChooserDialog returned OK but no filename.",
-                    file=sys.stderr,
-                )
                 self._set_status_message(
-                    "Export failed (no filename)",
-                    temporary=True,
-                    temporary_source_view=code_input,
+                    f"Export failed (no filename)", temporary_source_view=code_input
                 )
-
         elif response == Gtk.ResponseType.CANCEL:
             self._set_status_message(
-                "Export cancelled",
-                temporary=True,
-                temporary_source_view=code_input,
+                f"Export cancelled", temporary_source_view=code_input
             )
-        # Else: Other response types (like delete event), treat as cancel
-
-        dialog.destroy()  # Clean up the dialog window
+        dialog.destroy()
 
     def on_settings_clicked(self, *args):
-        """Shows the settings dialog, including per-tab venv options and global JSON settings."""
         current_tab_index = self.notebook.get_current_page()
-        current_paned = (
-            self.notebook.get_nth_page(current_tab_index)
-            if current_tab_index != -1
-            else None
-        )
+        if current_tab_index == -1:
+            self._set_status_message("No active tab to configure.")
+            return
 
-        # Get venv settings for the *current* tab
-        if not current_paned or not hasattr(current_paned, "venv_settings"):
+        current_paned = self.notebook.get_nth_page(current_tab_index)
+        current_tab_id = getattr(current_paned, "tab_id", None)
+
+        if (
+            not current_paned
+            or not hasattr(current_paned, "tab_settings")
+            or not current_tab_id
+        ):
             print(
-                "Warning: Could not get current tab's venv settings for dialog. Using defaults.",
+                f"Warning: Settings or ID missing for tab index {current_tab_index}.",
                 file=sys.stderr,
             )
-            # Use defaults but don't modify the non-existent tab's settings later
-            current_tab_venv_settings = DEFAULT_VENV_SETTINGS.copy()
-            can_modify_tab_settings = False
-        else:
-            # Get a copy to modify in the dialog without affecting the tab until Apply/OK
-            current_tab_venv_settings = current_paned.venv_settings.copy()
-            can_modify_tab_settings = True
+            self._set_status_message("Error accessing tab settings/ID.")
+            return
 
-        current_draw_whitespaces = self.app_settings.get(
-            SETTING_DRAW_WHITESPACES, DEFAULT_DRAW_WHITESPACES
-        )
-        current_tab_size = self.app_settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE)
-        current_translate_tabs = self.app_settings.get(
-            SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS
-        )
-        current_color_scheme_id = self.app_settings.get(
-            SETTING_COLOR_SCHEME_ID, DEFAULT_STYLE_SCHEME
-        )
+        current_tab_settings = current_paned.tab_settings.copy()
 
         dialog = Gtk.Dialog(
-            title="Settings",
+            title=f"Settings for Tab {current_tab_id}",
             parent=self,
             flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
         )
@@ -952,248 +812,252 @@ class PythonRunnerApp(Gtk.Window):
             Gtk.STOCK_CANCEL,
             Gtk.ResponseType.CANCEL,
             Gtk.STOCK_APPLY,
-            Gtk.ResponseType.APPLY,  # Allow applying without closing
+            Gtk.ResponseType.APPLY,
             Gtk.STOCK_OK,
             Gtk.ResponseType.OK,
         )
         dialog.set_resizable(False)
-        dialog.set_default_response(Gtk.ResponseType.OK)  # Enter key triggers OK
+        dialog.set_default_response(Gtk.ResponseType.OK)
 
         content_area = dialog.get_content_area()
         main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=12)
         content_area.add(main_vbox)
+        editor_frame = Gtk.Frame(label="Editor Settings")
+        main_vbox.pack_start(editor_frame, False, False, 0)
+        editor_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
+        editor_frame.add(editor_vbox)
 
-        # --- Global Editor Settings Section ---
-        global_frame = Gtk.Frame(label="Global Editor Settings")
-        main_vbox.pack_start(global_frame, False, False, 0)
-        global_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
-        global_frame.add(global_vbox)
-
-        # Get available color schemes
         style_manager = GtkSource.StyleSchemeManager.get_default()
         scheme_ids = style_manager.get_scheme_ids() or []
         schemes_data = []
         if scheme_ids:
-            for scheme_id in sorted(scheme_ids):
-                scheme = style_manager.get_scheme(scheme_id)
-                if scheme:
-                    schemes_data.append(
-                        {"id": scheme_id, "name": scheme.get_name() or scheme_id}
-                    )
-            # Sort schemes alphabetically by display name for the combo box
+            for sid in sorted(scheme_ids):
+                scheme = style_manager.get_scheme(sid)
+                schemes_data.append({"id": sid, "name": scheme.get_name() or sid})
             schemes_data.sort(key=lambda x: x["name"].lower())
 
-        # Draw Whitespaces Toggle
         dw_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        editor_vbox.pack_start(dw_hbox, False, False, 0)
         dw_label = Gtk.Label(label="Draw Whitespaces:", xalign=0.0)
-        dw_switch = Gtk.Switch(
-            active=current_draw_whitespaces
-        )  # <<< CHANGED: Read from self.app_settings
         dw_hbox.pack_start(dw_label, True, True, 0)
+        dw_switch = Gtk.Switch(
+            active=current_tab_settings.get(
+                SETTING_DRAW_WHITESPACES, DEFAULT_DRAW_WHITESPACES
+            )
+        )
         dw_hbox.pack_end(dw_switch, False, False, 0)
-        global_vbox.pack_start(dw_hbox, False, False, 0)
 
-        # Color Scheme Selector
         cs_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        editor_vbox.pack_start(cs_hbox, False, False, 0)
         cs_label = Gtk.Label(label="Color Scheme:", xalign=0.0)
+        cs_hbox.pack_start(cs_label, False, False, 0)
         cs_combo = Gtk.ComboBoxText()
-        active_index = -1
-        for i, scheme_info in enumerate(schemes_data):
-            cs_combo.append(scheme_info["id"], scheme_info["name"])
-            if (
-                scheme_info["id"] == current_color_scheme_id
-            ):
-                active_index = i
-        if active_index != -1:
-            cs_combo.set_active(active_index)
-        elif schemes_data:  # Fallback to first item if current not found
+        cs_hbox.pack_start(cs_combo, True, True, 0)
+        cs_combo.set_size_request(150, -1)
+        active_idx = -1
+        current_cs_id = current_tab_settings.get(
+            SETTING_COLOR_SCHEME_ID, DEFAULT_STYLE_SCHEME
+        )
+        for i, si in enumerate(schemes_data):
+            cs_combo.append(si["id"], si["name"])
+        active_idx = next(
+            (i for i, si in enumerate(schemes_data) if si["id"] == current_cs_id), -1
+        )
+        if active_idx != -1:
+            cs_combo.set_active(active_idx)
+        elif schemes_data:
             cs_combo.set_active(0)
             print(
-                f"Warning: Saved color scheme '{current_color_scheme_id}' not found. Select default.",
+                f"Warn: Scheme '{current_cs_id}' not found for tab {current_tab_id}. Selecting first.",
                 file=sys.stderr,
             )
+        elif not schemes_data:
+            cs_label.set_sensitive(False)
+            cs_combo.set_sensitive(False)
 
-        cs_combo.set_size_request(150, -1)
-        cs_hbox.pack_start(cs_label, False, False, 0)
-        cs_hbox.pack_start(cs_combo, True, True, 0)
-        global_vbox.pack_start(cs_hbox, False, False, 0)
-
-        # Tab Size Spinner
         ts_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        editor_vbox.pack_start(ts_hbox, False, False, 0)
         ts_label = Gtk.Label(label="Tab Size (Spaces):", xalign=0.0)
-        ts_spin = Gtk.SpinButton.new_with_range(1, 16, 1)  # Range 1 to 16, step 1
-        ts_spin.set_value(current_tab_size)
         ts_hbox.pack_start(ts_label, True, True, 0)
+        ts_spin = Gtk.SpinButton.new_with_range(1, 16, 1)
+        ts_spin.set_value(current_tab_settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE))
         ts_hbox.pack_end(ts_spin, False, False, 0)
-        global_vbox.pack_start(ts_hbox, False, False, 0)
 
-        # Translate Tabs (Spaces vs Tabs) Toggle
         tt_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        editor_vbox.pack_start(tt_hbox, False, False, 0)
         tt_label = Gtk.Label(label="Use Spaces Instead of Tabs:", xalign=0.0)
-        tt_switch = Gtk.Switch(
-            active=current_translate_tabs
-        )
         tt_hbox.pack_start(tt_label, True, True, 0)
+        tt_switch = Gtk.Switch(
+            active=current_tab_settings.get(
+                SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS
+            )
+        )
         tt_hbox.pack_end(tt_switch, False, False, 0)
-        global_vbox.pack_start(tt_hbox, False, False, 0)
 
-        # --- Current Tab Python Environment Section ---
-        tab_frame = Gtk.Frame(label="Current Tab Python Environment")
-        main_vbox.pack_start(tab_frame, False, False, 0)
-        tab_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
-        tab_frame.add(tab_vbox)
+        venv_frame = Gtk.Frame(label="Python Environment")
+        main_vbox.pack_start(venv_frame, False, False, 0)
+        venv_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
+        venv_frame.add(venv_vbox)
+        use_custom = current_tab_settings.get(
+            SETTING_USE_CUSTOM_VENV, DEFAULT_USE_CUSTOM_VENV
+        )
+        venv_folder = current_tab_settings.get(SETTING_VENV_FOLDER, DEFAULT_VENV_FOLDER)
 
-        # Get current tab's venv settings (already copied)
-        use_custom_venv_tab = current_tab_venv_settings.get("use_custom_venv", False)
-        venv_folder_tab = current_tab_venv_settings.get("venv_folder", "")
-
-        # Use Custom Venv Toggle
         cv_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        venv_vbox.pack_start(cv_hbox, False, False, 0)
         cv_label = Gtk.Label(label="Use Custom Virtual Environment:", xalign=0.0)
-        cv_switch = Gtk.Switch(active=use_custom_venv_tab)
         cv_hbox.pack_start(cv_label, True, True, 0)
+        cv_switch = Gtk.Switch(active=use_custom)
         cv_hbox.pack_end(cv_switch, False, False, 0)
-        tab_vbox.pack_start(cv_hbox, False, False, 0)
 
-        # Venv Path Selection
         vp_outer_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        venv_vbox.pack_start(vp_outer_hbox, False, False, 0)
         vp_label = Gtk.Label(label="Venv Path:", xalign=0.0)
-        vp_controls_hbox = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL, spacing=6
-        )  # Entry and Button
+        vp_outer_hbox.pack_start(vp_label, False, False, 0)
+        vp_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        vp_outer_hbox.pack_start(vp_controls, True, True, 0)
         vp_entry = Gtk.Entry(
-            text=venv_folder_tab,
-            sensitive=cv_switch.get_active(),  # Initially sensitive based on switch
-            xalign=0.0,  # Align text left
-            placeholder_text="Path to venv directory (e.g., /path/to/myenv)",
+            text=venv_folder,
+            sensitive=cv_switch.get_active(),
+            xalign=0.0,
+            placeholder_text="Path to venv directory",
         )
+        vp_controls.pack_start(vp_entry, True, True, 0)
         vp_button = Gtk.Button(label="Browse...", sensitive=cv_switch.get_active())
-        vp_controls_hbox.pack_start(vp_entry, True, True, 0)  # Entry expands
-        vp_controls_hbox.pack_start(vp_button, False, False, 0)  # Button fixed size
-        vp_outer_hbox.pack_start(vp_label, False, False, 0)  # Label fixed size
-        vp_outer_hbox.pack_start(
-            vp_controls_hbox, True, True, 0
-        )
-        tab_vbox.pack_start(vp_outer_hbox, False, False, 0)
+        vp_controls.pack_start(vp_button, False, False, 0)
 
-        # Enable/disable venv path controls based on the switch
-        def _toggle_venv_widgets(switch, *args):
-            is_active = switch.get_active()
-            vp_entry.set_sensitive(is_active)
-            vp_button.set_sensitive(is_active)
+        def _toggle_venv(switch, *args):
+            active = switch.get_active()
+            vp_entry.set_sensitive(active)
+            vp_button.set_sensitive(active)
 
-        cv_switch.connect("notify::active", _toggle_venv_widgets)
+        cv_switch.connect("notify::active", _toggle_venv)
 
-        # Browse for Venv Folder Button Handler
-        def _browse_venv(button):
-            folder_dialog = Gtk.FileChooserDialog(
+        def _browse(button):
+            fd = Gtk.FileChooserDialog(
                 title="Select Venv Folder",
-                parent=dialog,  # Parent is the settings dialog
+                parent=dialog,
                 action=Gtk.FileChooserAction.SELECT_FOLDER,
             )
-            folder_dialog.add_buttons(
+            fd.add_buttons(
                 Gtk.STOCK_CANCEL,
                 Gtk.ResponseType.CANCEL,
                 Gtk.STOCK_OPEN,
-                Gtk.ResponseType.OK,  # Use "Open" even for folders
+                Gtk.ResponseType.OK,
             )
-            # Try to set the initial folder based on the entry
-            current_path = vp_entry.get_text()
-            if current_path and os.path.isdir(current_path):
+            cp = vp_entry.get_text()
+            if cp and os.path.isdir(cp):
                 try:
-                    folder_dialog.set_current_folder(current_path)
-                except GLib.Error as e:  # Handle potential errors setting folder
-                    print(
-                        f"Warning: Could not set folder dialog path to '{current_path}': {e}",
-                        file=sys.stderr,
-                    )
-            elif os.path.isdir(os.path.expanduser("~")):  # Fallback to home directory
-                folder_dialog.set_current_folder(os.path.expanduser("~"))
+                    fd.set_current_folder(cp)
+                except GLib.Error as e:
+                    print(f"Warn: Cannot set folder path '{cp}': {e}", file=sys.stderr)
+            elif os.path.isdir(os.path.expanduser("~")):
+                fd.set_current_folder(os.path.expanduser("~"))
+            resp = fd.run()
+            if resp == Gtk.ResponseType.OK:
+                folder = fd.get_filename()
+                vp_entry.set_text(folder or "")
+            fd.destroy()
 
-            browse_response = folder_dialog.run()
-            if browse_response == Gtk.ResponseType.OK:
-                venv_folder = folder_dialog.get_filename()
-                if venv_folder:  # Check if a folder was selected
-                    vp_entry.set_text(venv_folder)
-            folder_dialog.destroy()
+        vp_button.connect("clicked", _browse)
 
-        vp_button.connect("clicked", _browse_venv)
-
-        # Function to apply changes (called by Apply and OK)
         def _apply_changes():
-            print("Applying settings changes...")
-            settings_changed = False
-            tab_settings_changed = False
-
-            # --- Apply Global Settings ---
-            new_scheme_id = cs_combo.get_active_id()
-            if (
-                new_scheme_id
-                and self.app_settings.get(SETTING_COLOR_SCHEME_ID) != new_scheme_id
-            ):
-                self.app_settings[SETTING_COLOR_SCHEME_ID] = new_scheme_id
-                settings_changed = True
-
-            new_draw_ws = dw_switch.get_active()
-            if self.app_settings.get(SETTING_DRAW_WHITESPACES) != new_draw_ws:
-                self.app_settings[SETTING_DRAW_WHITESPACES] = new_draw_ws
-                settings_changed = True
-
-            new_tab_size = ts_spin.get_value_as_int()
-            if self.app_settings.get(SETTING_TAB_SIZE) != new_tab_size:
-                self.app_settings[SETTING_TAB_SIZE] = new_tab_size
-                settings_changed = True
-
-            new_translate_tabs = tt_switch.get_active()
-            if self.app_settings.get(SETTING_TRANSLATE_TABS) != new_translate_tabs:
-                self.app_settings[SETTING_TRANSLATE_TABS] = new_translate_tabs
-                settings_changed = True
-
-            # --- Apply Current Tab Settings ---
-            if (
-                can_modify_tab_settings
-                and current_paned
-                and hasattr(current_paned, "venv_settings")
-            ):
-                new_use_custom = cv_switch.get_active()
-                new_venv_path = vp_entry.get_text()
-                if current_paned.venv_settings.get("use_custom_venv") != new_use_custom:
-                    current_paned.venv_settings["use_custom_venv"] = new_use_custom
-                    tab_settings_changed = True
-                if current_paned.venv_settings.get("venv_folder") != new_venv_path:
-                    current_paned.venv_settings["venv_folder"] = new_venv_path
-                    tab_settings_changed = True
-
-                if tab_settings_changed:
-                    print(
-                        f"Applied venv settings for tab {current_tab_index}: {current_paned.venv_settings}"
-                    )
-            elif not can_modify_tab_settings:
-                print("No active tab, skipping per-tab venv settings application.")
-            else:  # Should not happen if can_modify_tab_settings is True
+            apply_idx = self.notebook.get_current_page()
+            if apply_idx == -1:
                 print(
-                    "Warning: Could not apply venv settings (current tab pane invalid).",
+                    "Error: No active tab found when applying settings.",
                     file=sys.stderr,
                 )
+                self._set_status_message("Error applying settings (no active tab).")
+                return False
 
-            # If any settings changed, apply them visually and save
-            if settings_changed:
-                print("Global settings changed, applying to UI and saving...")
-                self.apply_settings()  # Apply global settings to all tabs
-                self._save_app_settings()  # Save the updated self.app_settings dict to JSON
+            target_paned = self.notebook.get_nth_page(apply_idx)
+            target_id = getattr(target_paned, "tab_id", None)
 
-            if tab_settings_changed:
-                print("Tab venv settings changed, updating status bar...")
-                self.update_python_env_status()  # Update status bar based on new venv setting
+            if (
+                not target_paned
+                or not hasattr(target_paned, "tab_settings")
+                or not target_id
+            ):
+                print(
+                    f"Error: Cannot find target tab or its data (index {apply_idx}) to apply settings.",
+                    file=sys.stderr,
+                )
+                self._set_status_message("Error applying settings.")
+                return False
 
-            if settings_changed or tab_settings_changed:
-                self._set_status_message("Settings applied.", temporary=True)
+            changed = False
+            target_settings = target_paned.tab_settings
+
+            new_cs_id = cs_combo.get_active_id()
+            new_draw_ws = dw_switch.get_active()
+            new_tab_size = ts_spin.get_value_as_int()
+            new_translate_tabs = tt_switch.get_active()
+            new_use_custom = cv_switch.get_active()
+            new_venv_path = vp_entry.get_text().strip()
+
+            if new_use_custom and not new_venv_path:
+                new_use_custom = False
+                cv_switch.set_active(False)
+                new_venv_path = ""
+                vp_entry.set_text("")
+            elif not new_use_custom:
+                new_venv_path = ""
+                if vp_entry.get_text():
+                    vp_entry.set_text("")
+
+            if (
+                cs_combo.get_sensitive()
+                and new_cs_id
+                and target_settings.get(SETTING_COLOR_SCHEME_ID) != new_cs_id
+            ):
+                target_settings[SETTING_COLOR_SCHEME_ID] = new_cs_id
+                changed = True
+            if (
+                target_settings.get(SETTING_DRAW_WHITESPACES, DEFAULT_DRAW_WHITESPACES)
+                != new_draw_ws
+            ):
+                target_settings[SETTING_DRAW_WHITESPACES] = new_draw_ws
+                changed = True
+            if target_settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE) != new_tab_size:
+                target_settings[SETTING_TAB_SIZE] = new_tab_size
+                changed = True
+            if (
+                target_settings.get(SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS)
+                != new_translate_tabs
+            ):
+                target_settings[SETTING_TRANSLATE_TABS] = new_translate_tabs
+                changed = True
+            if (
+                target_settings.get(SETTING_USE_CUSTOM_VENV, DEFAULT_USE_CUSTOM_VENV)
+                != new_use_custom
+            ):
+                target_settings[SETTING_USE_CUSTOM_VENV] = new_use_custom
+                changed = True
+            if (
+                target_settings.get(SETTING_VENV_FOLDER, DEFAULT_VENV_FOLDER)
+                != new_venv_path
+            ):
+                target_settings[SETTING_VENV_FOLDER] = new_venv_path
+                changed = True
+
+            if changed:
+                self.apply_tab_settings(apply_idx)
+                self.update_python_env_status()
+                saved = self._save_code_to_cache()
+                if saved:
+                    self._set_status_message(f"Settings applied.")
+                else:
+                    self._set_status_message(
+                        f"Settings applied, but FAILED TO SAVE cache!",
+                        temporary=False,
+                    )
+                return True
             else:
-                self._set_status_message("Settings unchanged.", temporary=True)
+                self._set_status_message(f"Settings unchanged.")
+                return False
 
-        # Dialog interaction loop
         dialog.show_all()
-
         while True:
             response = dialog.run()
             if response == Gtk.ResponseType.OK:
@@ -1203,477 +1067,344 @@ class PythonRunnerApp(Gtk.Window):
                 _apply_changes()
             elif (
                 response == Gtk.ResponseType.CANCEL
-                or response
-                == Gtk.ResponseType.DELETE_EVENT
+                or response == Gtk.ResponseType.DELETE_EVENT
             ):
                 self.update_python_env_status()
-                self._set_status_message("Settings cancelled.", temporary=True)
+                self._set_status_message(f"Settings cancelled.")
                 break
-
         dialog.destroy()
 
     def on_new_tab_clicked(self, *args):
-        """Handles the New Tab action, triggered by hotkey (Ctrl+N)."""
-        self._add_new_tab(add_empty=True, inherit_settings=True)
-        new_tab_widgets = self._get_current_tab_widgets()
-        new_code_input = new_tab_widgets["code_input"] if new_tab_widgets else None
-
-        self._set_status_message(
-            "New Tab Added", temporary=True, temporary_source_view=new_code_input
-        )
+        self._add_new_tab()
+        self.on_show_hotkeys()
 
     def on_show_hotkeys(self, *args):
-        """Displays a list of available hotkeys in the current tab's output window."""
-        tab_widgets = self._get_current_tab_widgets()
+        tab_widgets, _, _ = self._get_current_tab_widgets_settings_id()
         if not tab_widgets:
-            self._set_status_message(
-                "No active tab to show hotkeys in.", temporary=True
-            )
+            self._set_status_message("No active tab to show hotkeys in.")
             return
-
-        output_buffer = tab_widgets["output_buffer"]
-        output_view = tab_widgets["output_view"]
-
+        output_buffer, output_view = (
+            tab_widgets["output_buffer"],
+            tab_widgets["output_view"],
+        )
         hotkey_list = """--- Hotkeys ---
-Ctrl+R      : Run Code
-Ctrl+C      : Copy Code/Selection
-Ctrl+S      : Export Code to File...
-Ctrl+T      : Open Settings
-Ctrl+H      : Show Hotkeys (this list)
-Ctrl+N      : New Tab
-Ctrl+W      : Remove Current Tab
-Ctrl+P      : Pip Freeze (current env)
+Ctrl+R         : Run Code
+Ctrl+C         : Copy Code/Selection
+Ctrl+S         : Export Code to File...
+Ctrl+T / Ctrl+,: Open Tab Settings
+Ctrl+H         : Show Hotkeys (this list)
+Ctrl+N         : New Tab
+Ctrl+W         : Remove Current Tab
+Ctrl+P         : Pip Freeze (list packages)
 """
         if output_buffer and output_view:
             output_buffer.set_text(hotkey_list)
-            start_iter = output_buffer.get_start_iter()
-            output_view.scroll_to_iter(start_iter, 0.0, False, 0.0, 0.0)
-            self._set_status_message("Displayed hotkeys", temporary=True)
+            start = output_buffer.get_start_iter()
+            output_view.scroll_to_iter(start, 0.0, False, 0.0, 0.0)
         else:
-            print(
-                "Warning: Could not display hotkeys, output view not found.",
-                file=sys.stderr,
-            )
-            self._set_status_message("Error displaying hotkeys.", temporary=True)
+            print("Warn: Cannot display hotkeys.", file=sys.stderr)
+            self._set_status_message(f"Error displaying hotkeys.")
 
-    def apply_settings(self):
-        """Applies current application-wide (JSON settings) values to the UI of *all* tabs."""
-        print(
-            "Applying application-wide settings from self.app_settings to all tabs..."
-        )
-        n_pages = self.notebook.get_n_pages()
-        if n_pages > 0:
-            for i in range(n_pages):
-                self.apply_global_settings_to_tab(i)
-            print(f"Application-wide settings applied to {n_pages} tabs.")
-        else:
-            print("No tabs open, skipping settings application.")
-
-    def apply_global_settings_to_tab(self, page_index):
-        """Applies global editor settings (theme, whitespace, tabs) from self.app_settings to a specific tab."""
+    def apply_tab_settings(self, page_index):
         paned = self.notebook.get_nth_page(page_index)
+
         if (
             not paned
             or not hasattr(paned, "tab_widgets")
+            or not hasattr(paned, "tab_settings")
             or not isinstance(paned.tab_widgets, dict)
+            or not isinstance(paned.tab_settings, dict)
         ):
-            print(
-                f"Warning: Cannot apply settings, invalid widgets structure for tab {page_index}",
-                file=sys.stderr,
-            )
             return
 
-        tab_widgets = paned.tab_widgets
-        code_input = tab_widgets.get("code_input")
-        code_buffer = tab_widgets.get("code_buffer")
-        space_drawer = tab_widgets.get("space_drawer")
+        widgets, settings = paned.tab_widgets, paned.tab_settings
+        inp, buf, draw = (
+            widgets.get("code_input"),
+            widgets.get("code_buffer"),
+            widgets.get("space_drawer"),
+        )
+        if not inp or not buf or not draw:
+            pass
 
-        # Ensure required widgets are present
-        if not code_input or not code_buffer or not space_drawer:
-            print(
-                f"Warning: Missing one or more required widgets in tab {page_index}. Cannot apply all settings.",
-                file=sys.stderr,
+        if buf:
+            sm = GtkSource.StyleSchemeManager.get_default()
+            sid = settings.get(SETTING_COLOR_SCHEME_ID, DEFAULT_STYLE_SCHEME)
+            s = (
+                sm.get_scheme(sid)
+                or sm.get_scheme(DEFAULT_STYLE_SCHEME)
+                or sm.get_scheme("classic")
             )
-            # Continue applying settings for widgets that *are* present
+            if s:
+                cur = buf.get_style_scheme()
+                if not cur or cur.get_id() != s.get_id():
+                    buf.set_style_scheme(s)
 
-        # --- Apply Color Scheme ---
-        if code_buffer:
-            style_manager = GtkSource.StyleSchemeManager.get_default()
-            scheme_id = self.app_settings.get(
-                SETTING_COLOR_SCHEME_ID, DEFAULT_STYLE_SCHEME
+        if inp and draw:
+            draw_ws = settings.get(SETTING_DRAW_WHITESPACES, DEFAULT_DRAW_WHITESPACES)
+            types = (
+                GtkSource.SpaceTypeFlags.SPACE | GtkSource.SpaceTypeFlags.TAB
+                if draw_ws
+                else GtkSource.SpaceTypeFlags.NONE
             )
-            scheme = style_manager.get_scheme(scheme_id)
-            if not scheme:
-                print(
-                    f"Warning: Scheme '{scheme_id}' not found. Trying fallback '{DEFAULT_STYLE_SCHEME}'.",
-                    file=sys.stderr,
-                )
-                scheme_id = DEFAULT_STYLE_SCHEME
-                scheme = style_manager.get_scheme(scheme_id)
-            if not scheme:  # Try absolute fallback 'classic'
-                print(
-                    f"Warning: Fallback scheme '{DEFAULT_STYLE_SCHEME}' not found. Trying 'classic'.",
-                    file=sys.stderr,
-                )
-                scheme_id = "classic"  # A very common default
-                scheme = style_manager.get_scheme(scheme_id)
+            draw.set_types_for_locations(GtkSource.SpaceLocationFlags.ALL, types)
 
-            if scheme:
-                current_scheme = code_buffer.get_style_scheme()
-                if not current_scheme or current_scheme.get_id() != scheme.get_id():
-                    code_buffer.set_style_scheme(scheme)
-            else:
-                print(
-                    f"Error: Could not find any valid color scheme (tried '{scheme_id}') to apply to tab {page_index}.",
-                    file=sys.stderr,
-                )
-
-        # --- Apply Draw Whitespaces ---
-        if code_input and space_drawer:
-            draw_whitespaces = self.app_settings.get(
-                SETTING_DRAW_WHITESPACES, DEFAULT_DRAW_WHITESPACES
-            )
-            # Define the flags based on the setting
-            required_types = GtkSource.SpaceTypeFlags.NONE
-            if draw_whitespaces:
-                required_types = (
-                    GtkSource.SpaceTypeFlags.SPACE
-                    | GtkSource.SpaceTypeFlags.TAB
-                    # GtkSource.SpaceTypeFlags.NEWLINE
-                    # GtkSource.SpaceTypeFlags.NBSP # Optional: Non-breaking space
-                    # GtkSource.SpaceTypeFlags.LEADING # Optional: Leading space
-                    # GtkSource.SpaceTypeFlags.TEXT # Optional: Space within text
-                    # GtkSource.SpaceTypeFlags.TRAILING # Optional: Trailing space
-                )
-            current_types = space_drawer.get_types_for_locations(
-                GtkSource.SpaceLocationFlags.ALL
-            )
-            if current_types != required_types:
-                space_drawer.set_types_for_locations(
-                    GtkSource.SpaceLocationFlags.ALL, required_types
-                )
-
-        # --- Apply Tab Size and Translation ---
-        if code_input:
-            tab_size = self.app_settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE)
-            translate_tabs = self.app_settings.get(
-                SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS
-            )
-
-            if code_input.get_tab_width() != tab_size:
-                code_input.set_tab_width(tab_size)
-            if code_input.get_insert_spaces_instead_of_tabs() != translate_tabs:
-                code_input.set_insert_spaces_instead_of_tabs(translate_tabs)
-
-        if code_input:
-            code_input.queue_draw()
+        if inp:
+            size = settings.get(SETTING_TAB_SIZE, DEFAULT_TAB_SIZE)
+            trans = settings.get(SETTING_TRANSLATE_TABS, DEFAULT_TRANSLATE_TABS)
+            if inp.get_tab_width() != size:
+                inp.set_tab_width(size)
+            if inp.get_insert_spaces_instead_of_tabs() != trans:
+                inp.set_insert_spaces_instead_of_tabs(trans)
+            inp.queue_draw()
 
     def get_python_interpreter(self):
-        """Determines the Python interpreter path based on the *current* tab's venv settings."""
-        current_tab_index = self.notebook.get_current_page()
-        if current_tab_index == -1:
+        idx = self.notebook.get_current_page()
+
+        if idx == -1:
             return "Warning: No active tab"
 
-        current_paned = self.notebook.get_nth_page(current_tab_index)
-        # Get venv settings safely
-        if not current_paned or not hasattr(current_paned, "venv_settings"):
-            print(
-                f"Warning: Could not get venv settings for current tab index {current_tab_index}. Using defaults.",
-                file=sys.stderr,
-            )
-            tab_venv_settings = DEFAULT_VENV_SETTINGS  # Use default dict directly
+        paned = self.notebook.get_nth_page(idx)
+        tab_id = getattr(paned, "tab_id", f"Index {idx}")
+
+        if not paned or not hasattr(paned, "tab_settings"):
+            settings = DEFAULT_TAB_SETTINGS
         else:
-            tab_venv_settings = current_paned.venv_settings
+            settings = paned.tab_settings
 
-        use_custom_venv = tab_venv_settings.get("use_custom_venv", False)
-        venv_folder = tab_venv_settings.get("venv_folder", "")
+        use_custom = settings.get(SETTING_USE_CUSTOM_VENV, DEFAULT_USE_CUSTOM_VENV)
+        venv_folder = settings.get(SETTING_VENV_FOLDER, DEFAULT_VENV_FOLDER)
 
-        if use_custom_venv:
+        if use_custom and not venv_folder.strip():
+            use_custom = False
+
+        if use_custom:
             if venv_folder and os.path.isdir(venv_folder):
-                python3_executable = os.path.join(venv_folder, "bin", "python3")
-                if os.path.isfile(python3_executable) and os.access(
-                    python3_executable, os.X_OK
-                ):
-                    return python3_executable
-
-                # Fallback to just 'python' in the venv bin
-                python_executable = os.path.join(venv_folder, "bin", "python")
-                if os.path.isfile(python_executable) and os.access(
-                    python_executable, os.X_OK
-                ):
-                    return python_executable
-
+                found = None
+                for bindir in ["bin", "Scripts"]:
+                    binpath = os.path.join(venv_folder, bindir)
+                    if os.path.isdir(binpath):
+                        for name in ["python3", "python", "python.exe"]:
+                            exe = os.path.join(binpath, name)
+                            if os.path.isfile(exe) and os.access(exe, os.X_OK):
+                                found = exe
+                                return found
+            elif venv_folder:
                 print(
-                    f"Warning: No executable 'python' or 'python3' found in specified venv bin: '{os.path.join(venv_folder, 'bin')}'. Falling back to system Python.",
+                    f"Warn: Custom venv path '{venv_folder}' for tab {tab_id} is not a valid directory. Falling back.",
                     file=sys.stderr,
                 )
-            else:
-                if venv_folder:  # Only warn if a path was actually provided
-                    print(
-                        f"Warning: Custom venv path '{venv_folder}' is invalid or not a directory. Falling back to system Python.",
-                        file=sys.stderr,
-                    )
 
-        system_python3 = shutil.which("python3")
-        if system_python3:
-            return system_python3
-
-        system_python = shutil.which("python")
-        if system_python:
-            return system_python
+        system_py = shutil.which("python3") or shutil.which("python")
+        if system_py:
+            return system_py
 
         print(
-            "Error: Neither 'python3' nor 'python' found in system PATH.",
+            f"Error: No 'python3' or 'python' found in PATH (needed for tab {tab_id}).",
             file=sys.stderr,
         )
         return "Warning: No Python found"
 
     def update_python_env_status(self, source_view=None):
-        """Updates the status bar with the current Python environment info for the current tab."""
-        python_interpreter = self.get_python_interpreter()
-        python_version = "Unknown"
-        status_text = python_interpreter  # Default text if version check fails
+        py_interp = self.get_python_interpreter()
 
-        if python_interpreter.startswith("Warning:"):
-            status_text = f"Python Env: {python_interpreter}"
+        status_text = "Ready"
+
+        py_ver, status_suffix = "Unknown", py_interp
+        if py_interp.startswith("Warning:"):
+            status_suffix = f"Python Env: {py_interp}"
+        elif not os.path.exists(py_interp):
+            status_suffix = f"Python Env: Not Found ('{os.path.basename(py_interp)}')"
         else:
             try:
-                # Use a short timeout for version check
-                result = subprocess.run(
-                    [python_interpreter, "--version"],
-                    capture_output=True,  # Capture stdout and stderr
-                    text=True,  # Decode as text
-                    check=False,  # Don't raise exception on non-zero exit code
-                    timeout=2,  # Short timeout (2 seconds)
+                res = subprocess.run(
+                    [py_interp, "--version"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=2,
                     encoding="utf-8",
                     errors="replace",
                 )
-                version_output = (result.stderr or result.stdout or "").strip()
-
-                if result.returncode == 0 and "Python" in version_output:
-                    # Basic parsing, assumes format "Python X.Y.Z"
+                version_output = (res.stderr or res.stdout or "").strip()
+                if res.returncode == 0 and "Python" in version_output:
                     parts = version_output.split()
-                    if len(parts) > 1:
-                        python_version = parts[1]
-                    else:
-                        python_version = version_output  # Show the whole string
+                    py_ver = parts[1] if len(parts) > 1 else version_output
                 else:
-                    print(
-                        f"Warning: Failed to get version from '{python_interpreter}'. RC={result.returncode}, Stderr: '{result.stderr}', Stdout: '{result.stdout}'",
-                        file=sys.stderr,
-                    )
-                    python_version = "Version N/A"
-
+                    if res.returncode != 0 and not (
+                        "No such file" in (res.stderr or "")
+                        or "not found" in (res.stderr or "")
+                    ):
+                        pass
+                    py_ver = "Version N/A"
             except FileNotFoundError:
-                print(
-                    f"Error: Interpreter '{python_interpreter}' not found during version check.",
-                    file=sys.stderr,
-                )
-                python_version = "Not Found"
-                python_interpreter = os.path.basename(
-                    python_interpreter
-                )
+                py_ver = "Not Found"
+                py_interp = os.path.basename(py_interp)
             except subprocess.TimeoutExpired:
-                print(
-                    f"Warning: Timeout getting version from '{python_interpreter}'",
-                    file=sys.stderr,
-                )
-                python_version = "Timeout"
+                py_ver = "Timeout"
             except Exception as e:
                 print(
-                    f"Error checking Python version for '{python_interpreter}': {e}",
+                    f"Error checking Python version for '{py_interp}': {e}",
                     file=sys.stderr,
                 )
-                python_version = "Error"
+                py_ver = "Error"
 
-            display_path = python_interpreter
-            home_dir = os.path.expanduser("~")
-            if display_path.startswith(home_dir):
-                display_path = (
-                    "~" + display_path[len(home_dir) :]
-                )
-
-            status_text = f"{display_path} ({python_version})"
+            status_suffix = f"{py_interp} ({py_ver})"
+            status_text = status_suffix
 
         if not self._status_timeout_id:
             self.status_label.set_text(status_text)
-        else:
-            pass
 
     def on_tab_switched(self, notebook, page, page_num):
-        """Handler for tab switch event. Updates status bar."""
-        print(f"Switched to tab index: {page_num}")
         if self._status_timeout_id:
             GLib.source_remove(self._status_timeout_id)
             self._status_timeout_id = None
-            print("Cancelled pending status restore due to tab switch.")
+            self._temporary_status_context = None
+
         self.update_python_env_status()
 
     def on_page_removed(self, notebook, child, page_num):
-        """Handler for page removed event. Updates status bar if the active tab changed or no tabs left."""
-        print(f"Tab removed at index: {page_num}")
         current_page = notebook.get_current_page()
         if current_page != -1:
-            # If other tabs remain, update status for the new current tab
             self.update_python_env_status()
         else:
-            # No tabs left
-            if self._status_timeout_id:  # Cancel any pending restore
+            if self._status_timeout_id:
                 GLib.source_remove(self._status_timeout_id)
                 self._status_timeout_id = None
-            self.status_label.set_text("No tabs open. Press Ctrl+N for a new tab.")
+                self._temporary_status_context = None
+        self.status_label.set_text("No tabs open. Press Ctrl+N for a new tab.")
 
     def _set_status_message(
         self,
         text,
-        temporary=False,
-        temporary_source_view=None,  # Keep track of which tab triggered the message (optional)
+        temporary=True,
+        temporary_source_view=None,
         timeout=STATUS_MESSAGE_TIMEOUT_MS,
     ):
-        """Updates the status bar label, optionally resetting after a delay."""
         if self._status_timeout_id:
-            if GLib.source_remove(self._status_timeout_id):
-                pass
-            self._status_timeout_id = None  # Ensure it's cleared
+            GLib.source_remove(self._status_timeout_id)
+            self._status_timeout_id = None
 
         self.status_label.set_text(text)
 
         if temporary:
+            self._temporary_status_context = temporary_source_view
             self._status_timeout_id = GLib.timeout_add(
-                timeout,
-                self._restore_default_status,
+                timeout, self._restore_default_status
             )
+        else:
+            self._temporary_status_context = None
 
     def _restore_default_status(self, *user_data):
-        """Restores the status bar to the default (Python env info). Called by timeout or completion."""
-        current_timeout_id = self._status_timeout_id
         self._status_timeout_id = None
-
-        if current_timeout_id is None:
-            return GLib.SOURCE_REMOVE 
-
         self.update_python_env_status()
-
+        self._temporary_status_context = None
         return GLib.SOURCE_REMOVE
 
     def on_remove_tab_clicked(self, *args):
-        """Handles the Remove Tab action, triggered by hotkey (Ctrl+W)."""
-        current_page_index = self.notebook.get_current_page()
-        if current_page_index != -1:
-            print(f"Removing tab at index: {current_page_index}")
-            page_widget = self.notebook.get_nth_page(current_page_index)
-            self.notebook.remove_page(current_page_index)
-            new_tab_widgets = self._get_current_tab_widgets()
-            new_code_input = new_tab_widgets["code_input"] if new_tab_widgets else None
-            self._set_status_message(
-                "Tab removed.", temporary=True, temporary_source_view=new_code_input
-            )
+        idx = self.notebook.get_current_page()
+        if idx != -1:
+            page = self.notebook.get_nth_page(idx)
+            num_pages = self.notebook.get_n_pages()
 
+            if num_pages <= 1:
+                self._set_status_message("Cannot remove the last tab.", temporary=True)
+                return
+
+            tab_id = getattr(page, "tab_id", f"Index {idx}")
+            self.notebook.remove_page(idx)
+            self._save_code_to_cache()
+
+            new_widgets = self._get_current_tab_widgets()
+            new_input_view = new_widgets["code_input"] if new_widgets else None
+            self._set_status_message(
+                f"Tab '{tab_id}' removed.", temporary_source_view=new_input_view
+            )
         else:
-            self._set_status_message("No tab selected to remove.", temporary=True)
+            self._set_status_message("No tab selected to remove.")
 
     def on_pip_freeze_clicked(self, *args):
-        """Handles the Pip Freeze action (Ctrl+P) for the current tab's environment."""
-        tab_widgets = self._get_current_tab_widgets()
-        if not tab_widgets:
-            self._set_status_message("No active tab found.", temporary=True)
+        widgets, _, tab_id = self._get_current_tab_widgets_settings_id()
+        if not widgets:
+            self._set_status_message("No active tab found.")
             return
-
-        output_buffer = tab_widgets["output_buffer"]
-        output_view = tab_widgets["output_view"]
-        code_input = tab_widgets["code_input"]  # For status context
-
-        python_interpreter = self.get_python_interpreter()
-        # Check for invalid interpreter states
-        if python_interpreter.startswith("Warning:"):
-            error_msg = f"Error: Cannot run pip freeze, invalid Python interpreter ({python_interpreter}). Check settings (Ctrl+T)."
-            self._set_status_message(error_msg, temporary=False)  # Persistent error
-            output_buffer.set_text(
-                f"Error: Invalid Python interpreter selected:\n{python_interpreter}\n\nPlease check the settings for this tab (Ctrl+T)."
+        out_buf, out_view, inp = (
+            widgets["output_buffer"],
+            widgets["output_view"],
+            widgets["code_input"],
+        )
+        py_interp = self.get_python_interpreter()
+        if py_interp.startswith("Warning:") or not os.path.exists(py_interp):
+            msg = (
+                f"Error: Cannot run pip freeze, invalid/missing Python ('{py_interp}')."
             )
+            self._set_status_message(msg, temporary=False)
+            out_buf.set_text(f"{msg}\nPlease check settings (Ctrl+T).")
             return
 
-        # Set status and clear output
         self._set_status_message(
-            f"Running pip freeze with {os.path.basename(python_interpreter)}...",
-            temporary=True,  # Keep status until completion
-            temporary_source_view=code_input,
+            f"Running pip freeze ({os.path.basename(py_interp)})...",
+            temporary_source_view=inp,
         )
-        output_buffer.set_text("Running pip freeze...\n")  # Initial message in output
-
-        # Run pip freeze in a separate thread
-        thread = threading.Thread(
+        out_buf.set_text("Running pip freeze...\n")
+        threading.Thread(
             target=self._run_pip_freeze_thread,
-            args=(python_interpreter, output_buffer, output_view, code_input),
+            args=(py_interp, out_buf, out_view, inp),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
     def _run_pip_freeze_thread(
         self, python_interpreter, output_buffer, output_view, source_view
     ):
-        """Worker thread function to execute pip freeze."""
-        output = ""
-        error = ""
-        success = False
+        output, error, success = "", "", False
         process = None
-
         try:
-            command = [python_interpreter, "-m", "pip", "freeze"]
+            cmd = [python_interpreter, "-m", "pip", "freeze"]
             process = subprocess.Popen(
-                command,
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
             )
-
-            # Communicate with timeout
-            stdout_data, stderr_data = process.communicate(timeout=EXECUTION_TIMEOUT)
-
+            stdout, stderr = process.communicate(timeout=EXECUTION_TIMEOUT)
             if process.returncode == 0:
-                output = stdout_data
-                if not output.strip():  # Handle case where no packages are installed
-                    output = "# No packages installed in this environment."
+                output = stdout or "# No packages installed."
                 success = True
-                if stderr_data:
-                    error = f"--- Pip Warnings/Stderr ---\n{stderr_data}"
+                if stderr:
+                    error = f"--- Pip Warnings/Stderr ---\n{stderr}"
             else:
-                # Specific check for "No module named pip"
-                if "No module named pip" in stderr_data:
-                    error = f"Error: 'pip' module not found for interpreter '{python_interpreter}'.\nPlease ensure pip is installed in the selected environment."
-                else:  # Generic error message
-                    error = f"Error running pip freeze (Exit Code: {process.returncode}):\n{stderr_data}"
-                output = stdout_data  # Include any stdout even on error
-
+                if "No module named pip" in stderr:
+                    error = f"Error: 'pip' module not found for '{os.path.basename(python_interpreter)}'."
+                else:
+                    error = f"Error running pip freeze (RC: {process.returncode}):\n{stderr}"
+                output = stdout
         except FileNotFoundError:
-            error = f"Error: Python interpreter '{python_interpreter}' not found."
+            error = f"Error: Interpreter '{python_interpreter}' not found."
         except subprocess.TimeoutExpired:
+            success = False
             if process:
                 process.kill()
-                stdout_data, stderr_data = process.communicate()  # Get remaining output
-                output = stdout_data
-                error = f"--- Error: pip freeze timed out after {EXECUTION_TIMEOUT} seconds ---\n{stderr_data}"
+                try:
+                    stdout, stderr = process.communicate(timeout=1)
+                except Exception:
+                    stdout, stderr = "", "(Timeout/Error fetching output after kill)"
+                output = stdout
+                error = f"--- Error: pip freeze timed out ({EXECUTION_TIMEOUT}s) ---\n{stderr}"
             else:
-                error = (
-                    f"Error: pip freeze timed out after {EXECUTION_TIMEOUT} seconds."
-                )
+                error = f"Error: pip freeze timed out ({EXECUTION_TIMEOUT}s)."
         except Exception as e:
             error = f"Error executing pip freeze: {e}"
-            if process and process.poll() is None:  # Check if process still running
+            success = False
+        finally:
+            if process and process.poll() is None:
                 try:
                     process.kill()
-                    process.communicate()
-                except Exception as kill_e:
-                    print(
-                        f"Error trying to kill pip process after exception: {kill_e}",
-                        file=sys.stderr,
-                    )
-
-        # Schedule UI update on the main thread
+                    process.communicate(timeout=1)
+                except Exception:
+                    pass
         GLib.idle_add(
-            self._update_output_view,  # Reuse the same update function
+            self._update_output_view,
             output,
             error,
             success,
@@ -1684,28 +1415,20 @@ Ctrl+P      : Pip Freeze (current env)
 
 
 def main():
+    GLib.set_prgname(APP_ID)
     app = Gtk.Application.new(APP_ID, Gio.ApplicationFlags.FLAGS_NONE)
 
     def do_activate(application):
-        windows = application.get_windows()
-        if windows:
-            print(
-                "Application already running in this instance. Presenting existing window."
-            )
-            windows[0].present()
+        if application.get_windows():
+            application.get_windows()[0].present()
         else:
-            print("Application starting. Creating main window.")
             window = PythonRunnerApp()
             application.add_window(window)
 
     app.connect("activate", do_activate)
-
-    # Run the GTK main loop
     exit_status = app.run(sys.argv)
-    print(f"Application exiting with status: {exit_status}")
     sys.exit(exit_status)
 
 
 if __name__ == "__main__":
-    GLib.set_prgname(APP_ID)
     main()
