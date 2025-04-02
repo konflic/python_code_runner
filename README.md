@@ -12,5 +12,8 @@ Features:
 
 Note:
 
-Application stores cache and setting files in ~/.cache/com.example.python-runner/ directory
+Application stores cache and setting files in `~/.cache/com.example.python-runner/` directory
 
+Dependencies:
+
+`sudo apt-get install gir1.2-gtksource-3.0 libgtksourceview-3.0-dev`
