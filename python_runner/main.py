@@ -1174,6 +1174,13 @@ Ctrl+P         : Pip Freeze (list packages)
         use_custom = settings.get(SETTING_USE_CUSTOM_VENV, DEFAULT_USE_CUSTOM_VENV)
         venv_folder = settings.get(SETTING_VENV_FOLDER, DEFAULT_VENV_FOLDER)
 
+        # Set current working directory venv
+        if venv_folder == DEFAULT_VENV_FOLDER:
+            os.chdir(os.path.expanduser("~"))
+        else:
+            new_cwd = venv_folder.split("venv")[0]
+            os.chdir(new_cwd)
+
         if use_custom and not venv_folder.strip():
             use_custom = False
 
